@@ -3,3 +3,6 @@
 /client
 /dist
 /dropbox.db
+exe.spec
+crypto/__pycache__/vigenere.cpython-310.pyc
+exeterst/exe.py
