@@ -1,0 +1,405 @@
+# client/streamlit_app.py
+import base64
+import json
+import os
+from dataclasses import dataclass
+from typing import Optional
+
+import requests
+import streamlit as st
+
+# --- Local crypto imports (from your project tree) ---
+# Ensure you run this app from the project root so these imports resolve.
+from auth.keys import derive_key_from_password, ARGON_PARAMS
+from crypto.supertext import super_encrypt_text, super_decrypt_text
+from crypto.files import aesgcm_encrypt_file_with_passphrase, aesgcm_decrypt_bytes_with_passphrase
+from stego.png_lsb import hide_to_png, reveal_from_png
+import tempfile, pathlib
+
+# at top
+FETCH_KEY = "fetched_ids_v1"
+if FETCH_KEY not in st.session_state:
+    st.session_state[FETCH_KEY] = set()
+
+# ------------------------
+# Small client wrapper
+# ------------------------
+@dataclass
+class Session:
+    api: str
+    token: Optional[str] = None
+    username: Optional[str] = None
+
+    @property
+    def headers(self):
+        if not self.token:
+            return {}
+        return {"Authorization": f"Bearer {self.token}"}
+    
+    
+
+
+def api_register(sess: Session, username: str, password: str):
+    r = requests.post(f"{sess.api}/auth/register", json={"username": username, "password": password})
+    if r.status_code == 409:
+        return False, "Username already exists"
+    r.raise_for_status()
+    return True, "Registered"
+
+
+def api_login(sess: Session, username: str, password: str):
+    r = requests.post(f"{sess.api}/auth/login", json={"username": username, "password": password})
+    if r.status_code != 200:
+        return None
+    tok = r.json().get("token")
+    return tok
+
+
+def api_send_json(sess: Session, to_user: str, filename: str, mime: str, payload_bytes: bytes, ttl_min: int = 30, one_time: bool = True):
+    b64 = base64.b64encode(payload_bytes).decode()
+    r = requests.post(
+        f"{sess.api}/api/send-json",
+        headers=sess.headers,
+        json={
+            "to": to_user,
+            "payload_b64": b64,
+            "filename": filename,
+            "mime": mime,
+            "ttl_min": ttl_min,
+            "one_time": one_time,
+        },
+    )
+    return r
+
+
+def api_inbox(sess: Session):
+    r = requests.get(f"{sess.api}/api/inbox", headers=sess.headers)
+    r.raise_for_status()
+    return r.json()
+
+def api_recv64(sess: Session, item_id: str) -> dict:
+    r = requests.get(f"{sess.api}/api/recv64/{item_id}", headers=sess.headers)
+    if r.status_code != 200:
+        raise RuntimeError(f"{r.status_code}: {r.text}")
+    return r.json()
+
+
+def api_recv(sess: Session, item_id: str) -> bytes:
+    r = requests.get(f"{sess.api}/api/recv/{item_id}", headers=sess.headers)
+    if r.status_code != 200:
+        raise RuntimeError(r.text)
+    return r.content
+
+
+# ------------------------
+# UI Helpers
+# ------------------------
+
+def reveal_env_from_png_bytes(png_bytes: bytes) -> dict:
+    """
+    Write PNG bytes to a temp file and reveal the hidden JSON envelope.
+    Returns the envelope (dict). Raises ValueError if nothing found.
+    """
+    tmp = pathlib.Path(tempfile.gettempdir()) / "inbox_reveal.png"
+    tmp.write_bytes(png_bytes)
+    env = reveal_from_png(str(tmp))  # -> dict (your stego util decodes base64+json)
+    if not isinstance(env, dict) or "ct_b64" not in env:
+        raise ValueError("No hidden envelope found in PNG.")
+    return env
+
+AUTH_KEY = "auth_state_v1"
+
+def get_session() -> Session:
+    if AUTH_KEY not in st.session_state:
+        # Default API: local dev
+        st.session_state[AUTH_KEY] = Session(api=os.environ.get("CIPHERDROP_API", "http://localhost:8000"))
+    return st.session_state[AUTH_KEY]
+
+
+def do_logout():
+    st.session_state[AUTH_KEY].token = None
+    st.session_state[AUTH_KEY].username = None
+
+
+# ------------------------
+# Streamlit App
+# ------------------------
+st.set_page_config(page_title="CipherDrop UI", page_icon="🔐", layout="centered")
+
+st.title("CipherDrop · Secure Messaging")
+
+sess = get_session()
+
+with st.sidebar:
+    st.subheader("Server")
+    api_url = st.text_input("API Base URL", value=sess.api)
+    if api_url and api_url != sess.api:
+        sess.api = api_url
+
+    st.subheader("Account")
+    if sess.token:
+        st.caption(f"Signed in as **{sess.username}**")
+        if st.button("Logout"):
+            do_logout()
+            st.rerun()
+    else:
+        auth_tab = st.tabs(["Login", "Register"])
+        with auth_tab[0]:
+            u = st.text_input("Username", key="login_user")
+            p = st.text_input("Password", type="password", key="login_pass")
+            if st.button("Login"):
+                if not u or not p:
+                    st.error("Fill username and password")
+                else:
+                    tok = api_login(sess, u, p)
+                    if not tok:
+                        st.error("Invalid credentials")
+                    else:
+                        sess.token = tok
+                        sess.username = u
+                        st.success("Logged in")
+                        st.rerun()
+        with auth_tab[1]:
+            ur = st.text_input("New username", key="reg_user")
+            pr = st.text_input("New password", type="password", key="reg_pass")
+            if st.button("Create account"):
+                if not ur or not pr:
+                    st.error("Fill username and password")
+                else:
+                    ok, msg = api_register(sess, ur, pr)
+                    if ok:
+                        st.success("Registered. You can log in now.")
+                    else:
+                        st.error(msg)
+
+st.divider()
+
+if not sess.token:
+    st.info("Sign in to send and receive messages.")
+    st.stop()
+
+# ------------------------
+# Main tabs (Send / Inbox / Files / Stego)
+# ------------------------
+mtabs = st.tabs(["Send Text", "Inbox (Decrypt)", "Send File", "Image Stego", "Stego Decrypt"])
+
+# --- Send Text ---
+with mtabs[0]:
+    st.subheader("Encrypt & Send Text")
+    col1, col2 = st.columns(2)
+    with col1:
+        to_user = st.text_input("Recipient username")
+        passphrase = st.text_input("Shared passphrase (kept local)", type="password")
+    with col2:
+        vkey = st.text_input("Vigenère key", value="CRYPTO")
+        ttl = st.number_input("TTL (minutes)", min_value=5, max_value=1440, value=30, step=5)
+        one_time = st.toggle("One-time read (delete after first open)", value=True)
+        
+    message = st.text_area("Message", height=160, placeholder="Type your secret here…")
+
+    if st.button("Encrypt & Send", type="primary"):
+        if not to_user or not passphrase or not message:
+            st.error("Recipient, passphrase, and message are required")
+        else:
+            # Derive 32-byte key with Argon2id and fresh salt
+            dk = derive_key_from_password(passphrase)
+            env = super_encrypt_text(message, vkey, dk.key)
+            # include KDF params so receiver can derive same key
+            env["kdf"] = {
+                "type": "argon2id",
+                "salt_b64": base64.b64encode(dk.salt).decode(),
+                "t": ARGON_PARAMS["time_cost"],
+                "m": ARGON_PARAMS["memory_cost"],
+                "p": ARGON_PARAMS["parallelism"],
+            }
+            blob = json.dumps(env, ensure_ascii=False).encode()
+            r = api_send_json(sess, to_user, filename="message.json", mime="application/json", payload_bytes=blob, ttl_min=int(ttl), one_time=one_time)
+
+            if r.status_code == 200:
+                st.success("Sent")
+                st.json(r.json())
+            elif r.status_code == 404:
+                st.error("Recipient not found")
+            else:
+                st.error(f"Error: {r.status_code} {r.text}")
+
+# --- Inbox / Decrypt ---
+with mtabs[1]:
+    st.subheader("Inbox")
+    inbox = api_inbox(sess)
+    if not inbox:
+        st.caption("No items.")
+    else:
+        for item in inbox:
+            with st.expander(f"From {item['from_user']} · {item['filename'] or item['mime']} · id={item['id']}"):
+                st.write(f"Created: {item['created_at']}")
+                st.write(f"Expires: {item['expires_at']}")
+                st.write(f"Consumed: {item['consumed']}")
+
+                colA, colB = st.columns(2)
+                with colA:
+                    if st.button(f"Download raw ({item['id']})"):
+                        data = api_recv(sess, item["id"])  # marks consumed
+                        st.download_button("Save downloaded content", data=data, file_name=item.get("filename") or f"{item['id']}.bin")
+                with colB:
+                    is_text_env = (item.get("mime","").startswith("application/json")
+                                 or str(item.get("filename","")).lower().endswith(".json"))
+                    is_png = (item.get("mime","") == "image/png") or str(item.get("filename","")).lower().endswith(".png")
+
+                    st.write("Decrypt")
+                    passphrase_dec = st.text_input(f"Passphrase for {item['id']}", type="password", key=f"pw_{item['id']}")
+                    vkey_dec = st.text_input(f"Vigenère key for {item['id']}", value="CRYPTO", key=f"vk_{item['id']}")
+
+                    if not is_text_env and not is_png:
+                        st.write("Decrypt file (.enc)")
+                        passphrase_file = st.text_input(f"Passphrase for {item['id']} (file)", type="password", key=f"file_pw_{item['id']}")
+                        if st.button(f"Fetch & Decrypt (file) · {item['id']}", key=f"file_btn_{item['id']}"):
+                            try:
+                                pkg = api_recv64(sess, item["id"])   # marks consumed if one-time
+                                blob = base64.b64decode(pkg["b64"])  # encrypted bytes
+                                pt = aesgcm_decrypt_bytes_with_passphrase(passphrase_file, blob)  # plaintext bytes
+
+                                # Guess original name: strip .enc if present
+                                fname = pkg.get("filename") or f"{item['id']}.bin"
+                                if fname.lower().endswith(".enc"):
+                                    fname = fname[:-4]
+
+                                st.success("File decrypted. Save it below:")
+                                st.download_button("Download decrypted file", data=pt, file_name=fname)
+                            except Exception as e:
+                                st.error(f"File decrypt failed: {e}")
+
+                    elif is_png:
+                        if st.button(f"Reveal & Decrypt (stego PNG) · {item['id']}"):
+                            try:
+                                pkg = api_recv64(sess, item["id"])   # marks consumed if one-time
+                                png_bytes = base64.b64decode(pkg["b64"])
+
+                                # ⬇️ show the actual image
+                                st.image(png_bytes, caption=pkg.get("filename") or "stego image", use_container_width=True)
+
+                                # reveal envelope from PNG then decrypt text
+                                env = reveal_env_from_png_bytes(png_bytes)
+                                kdf = env.get("kdf", {})
+                                salt_b64 = kdf.get("salt_b64")
+                                if not salt_b64:
+                                    st.error("Envelope missing KDF salt")
+                                else:
+                                    salt = base64.b64decode(salt_b64)
+                                    dk = derive_key_from_password(passphrase_dec, salt)
+                                    clear = super_decrypt_text(env, vkey_dec, dk.key)
+                                    st.success("Decrypted text:")
+                                    st.code(clear)
+                            except Exception as e:
+                                st.error(f"Stego decrypt failed: {e}")
+                    else:
+                        if st.button(f"Fetch & Decrypt (text) · {item['id']}"):
+                            try:
+                                pkg = api_recv64(sess, item["id"])
+                                data = base64.b64decode(pkg["b64"])
+                                try:
+                                    env = json.loads(data.decode("utf-8", "strict"))
+                                except UnicodeDecodeError:
+                                    st.error("This item isn't a text envelope. Download raw instead.")
+                                    st.stop()
+                                kdf = env.get("kdf", {})
+                                salt_b64 = kdf.get("salt_b64")
+                                if not salt_b64:
+                                    st.error("Envelope missing KDF salt")
+                                else:
+                                    salt = base64.b64decode(salt_b64)
+                                    dk = derive_key_from_password(passphrase_dec, salt)
+                                    clear = super_decrypt_text(env, vkey_dec, dk.key)
+                                    st.success("Decrypted text:")
+                                    st.code(clear)
+                            except Exception as e:
+                                st.error(f"Decrypt failed: {e}")
+
+
+# --- Send File ---
+with mtabs[2]:
+    st.subheader("Encrypt & Send File")
+    to_user_f = st.text_input("Recipient username", key="file_to")
+    passphrase_f = st.text_input("Shared passphrase", type="password", key="file_pw")
+    vkey_info = st.caption("Files use AES-GCM; Vigenère isn't used here.")
+    ttl_f = st.number_input("TTL (minutes)", min_value=5, max_value=1440, value=30, step=5, key="file_ttl")
+    one_time_f = st.toggle("One-time read", value=True, key="file_onetime")
+    up = st.file_uploader("Pick a file", key="file_upl")
+
+    if st.button("Encrypt & Send File", disabled=not up):
+        if not to_user_f or not passphrase_f or not up:
+            st.error("Recipient, passphrase, and file are required.")
+        else:
+            # write uploaded file to temp
+            src = pathlib.Path(tempfile.gettempdir()) / up.name
+            src.write_bytes(up.read())
+            outp = src.with_suffix(src.suffix + ".enc")
+            aesgcm_encrypt_file_with_passphrase(passphrase_f, str(src), str(outp))
+            # upload encrypted bytes
+            files = {"file": (outp.name, outp.read_bytes(), "application/octet-stream")}
+            r = requests.post(f"{sess.api}/api/send-file",
+                              headers=sess.headers,
+                              data={"to": to_user_f, "ttl_min": int(ttl_f), "one_time": str(one_time_f).lower()},
+                              files=files)
+            if r.status_code == 200:
+                st.success("Encrypted file sent.")
+                st.json(r.json())
+            else:
+                st.error(f"Send failed: {r.status_code} {r.text}")
+
+# --- Image Steganography ---
+with mtabs[3]:
+    st.subheader("Hide ciphertext inside PNG")
+    png = st.file_uploader("Cover PNG", type=["png"], key="stego_in")
+    to_user_s = st.text_input("Recipient username", key="stego_to")
+    passphrase_s = st.text_input("Shared passphrase", type="password", key="stego_pw")
+    vkey_s = st.text_input("Vigenère key", value="CRYPTO", key="stego_vk")
+    one_time_s = st.toggle("One-time read", value=True, key="stego_ot")
+    ttl_s = st.number_input("TTL (minutes)", 5, 1440, 30, 5, key="stego_ttl")
+    msg_s = st.text_area("Text to hide", height=120, key="stego_msg")
+
+    if st.button("Encrypt → Hide → Send PNG"):
+        if not (png and to_user_s and passphrase_s and msg_s):
+            st.error("All fields required.")
+        else:
+            dk = derive_key_from_password(passphrase_s)
+            env = super_encrypt_text(msg_s, vkey_s, dk.key)
+            env["kdf"] = {"type":"argon2id","salt_b64": base64.b64encode(dk.salt).decode()}
+            # write cover, hide payload
+            import tempfile, pathlib, json as _json
+            cover = pathlib.Path(tempfile.gettempdir()) / "cover.png"
+            cover.write_bytes(png.read())
+            outp = cover.with_name("secret.png")
+            hide_to_png(str(cover), str(outp), env)
+            files = {"file": (outp.name, outp.read_bytes(), "image/png")}
+            r = requests.post(f"{sess.api}/api/send-file",
+                              headers=sess.headers,
+                              data={"to": to_user_s, "ttl_min": int(ttl_s), "one_time": str(one_time_s).lower()},
+                              files=files)
+            st.success("Stego PNG sent.") if r.status_code==200 else st.error(f"{r.status_code}: {r.text}")
+
+# --- Local Stego Decrypt ---
+with mtabs[3]:
+    st.subheader("Reveal & Decrypt from a local PNG")
+    up_png = st.file_uploader("Choose a PNG with hidden text", type=["png"], key="stego_local_in")
+
+    if up_png:
+        # ⬇️ preview the uploaded PNG
+        st.image(up_png.getvalue(), caption=up_png.name, use_column_width=True)
+
+    passphrase_s = st.text_input("Passphrase", type="password", key="stego_local_pw")
+    vkey_s = st.text_input("Vigenère key", value="CRYPTO", key="stego_local_vk")
+
+    if st.button("Reveal & Decrypt"):
+        if not up_png or not passphrase_s:
+            st.error("PNG and passphrase required.")
+        else:
+            try:
+                env = reveal_env_from_png_bytes(up_png.getvalue())
+                salt = base64.b64decode(env["kdf"]["salt_b64"])
+                dk = derive_key_from_password(passphrase_s, salt)
+                clear = super_decrypt_text(env, vkey_s, dk.key)
+                st.success("Decrypted text:")
+                st.code(clear)
+            except Exception as e:
+                st.error(f"Stego decrypt failed: {e}")
