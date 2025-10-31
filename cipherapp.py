@@ -213,11 +213,16 @@ def reveal_env_from_png_bytes(png_bytes: bytes) -> dict:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CipherDrop UI (PySide6)")
+        self.setWindowTitle("CipherDrop")
         self.setGeometry(100, 100, 900, 700)
+        
+        # Load and set window icon
+        icon_path = BASE / "icon/Cyber-Cage.png"  # Relative to bundled resources
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
 
         # --- App State ---
-        self.session = Session(api=os.environ.get("CIPHERDROP_API", "https://chp.tedjajaya.tech"))
+        self.session = Session(api=os.environ.get("CIPHERDROP_API", "https://chp.fyuko.app"))
         self.threadpool = QThreadPool()
         self.running_workers = set()
         
