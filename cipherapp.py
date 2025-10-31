@@ -222,7 +222,7 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(icon_path)))
 
         # --- App State ---
-        self.session = Session(api=os.environ.get("CIPHERDROP_API", "https://chp.fyuko.app"))
+        self.session = Session(api=os.environ.get("CIPHERDROP_API",  "https://fyuko.dev"))
         self.threadpool = QThreadPool()
         self.running_workers = set()
         
