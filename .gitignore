@@ -6,3 +6,6 @@
 exe.spec
 crypto/__pycache__/vigenere.cpython-310.pyc
 exeterst/exe.py
+exe.py
+CipherDrop.spec
+__pycache__/server.cpython-310.pyc

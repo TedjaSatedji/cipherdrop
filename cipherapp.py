@@ -26,6 +26,15 @@ from dataclasses import dataclass
 from typing import Optional, Callable
 import traceback
 
+# for pyinstall
+# Resolve paths both in normal Python and PyInstaller (_MEIPASS)
+ROOT = pathlib.Path(__file__).resolve().parent
+BASE = pathlib.Path(getattr(sys, "_MEIPASS", ROOT))   # <- bundle dir at runtime
+
+# Make bundled packages importable (auth/, crypto/, stego/)
+sys.path.insert(0, str(BASE))
+# --- END OF ADDED CODE ---
+
 # --- Qt Imports ---
 from PySide6.QtCore import (
     QObject, Signal, Slot, QRunnable, QThreadPool, Qt
@@ -174,6 +183,15 @@ def api_recv(sess: Session, item_id: str) -> bytes:
         raise RuntimeError(r.text)
     return r.content
 
+# --- ADDED: API function for deleting ---
+def api_delete_item(sess: Session, item_id: str):
+    """Calls the DELETE endpoint for an item."""
+    r = requests.delete(f"{sess.api}/api/recv/{item_id}", headers=sess.headers)
+    r.raise_for_status() # Let worker catch non-200s
+    return r.json() # Should return {"ok": True}
+# --- END ADD ---
+
+
 # --- UI Helpers ---
 
 def reveal_env_from_png_bytes(png_bytes: bytes) -> dict:
@@ -199,7 +217,7 @@ class MainWindow(QMainWindow):
         self.setGeometry(100, 100, 900, 700)
 
         # --- App State ---
-        self.session = Session(api=os.environ.get("CIPHERDROP_API", "http://localhost:8000"))
+        self.session = Session(api=os.environ.get("CIPHERDROP_API", "https://chp.tedjajaya.tech"))
         self.threadpool = QThreadPool()
         self.running_workers = set()
         
@@ -391,6 +409,7 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(header)
         header_layout.addStretch()
         self.refresh_inbox_button = QPushButton("Refresh Inbox")
+        self.refresh_inbox_button.setObjectName("refresh_inbox_button") # For styling
         self.refresh_inbox_button.clicked.connect(self.do_refresh_inbox)
         header_layout.addWidget(self.refresh_inbox_button)
         
@@ -656,6 +675,7 @@ class MainWindow(QMainWindow):
         worker.signals.success.connect(lambda token: self.on_login_success(token, username))
         worker.signals.error.connect(self.on_login_error)
         worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        worker.signals.finished.connect(lambda: self.login_button.setEnabled(True))
         self.running_workers.add(worker) # Hold reference
         self.threadpool.start(worker)
 
@@ -675,6 +695,7 @@ class MainWindow(QMainWindow):
         worker.signals.success.connect(self.on_register_success)
         worker.signals.error.connect(self.on_register_error)
         worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        worker.signals.finished.connect(lambda: self.reg_button.setEnabled(True))
         self.running_workers.add(worker) # Hold reference
         self.threadpool.start(worker)
 
@@ -717,6 +738,7 @@ class MainWindow(QMainWindow):
         worker.signals.success.connect(self.on_send_text_success)
         worker.signals.error.connect(self.on_send_text_error)
         worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        worker.signals.finished.connect(lambda: self.send_text_button.setEnabled(True))
         self.running_workers.add(worker) # Hold reference
         self.threadpool.start(worker)
 
@@ -730,6 +752,7 @@ class MainWindow(QMainWindow):
         worker.signals.success.connect(self.on_inbox_success)
         worker.signals.error.connect(self.on_inbox_error)
         worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        worker.signals.finished.connect(lambda: self.refresh_inbox_button.setEnabled(True))
         self.running_workers.add(worker) # Hold reference
         self.threadpool.start(worker)
 
@@ -786,6 +809,7 @@ class MainWindow(QMainWindow):
         worker.signals.success.connect(self.on_send_file_success)
         worker.signals.error.connect(self.on_send_file_error)
         worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        worker.signals.finished.connect(lambda: self.send_file_button.setEnabled(True))
         self.running_workers.add(worker) # Hold reference
         self.threadpool.start(worker)
 
@@ -848,6 +872,7 @@ class MainWindow(QMainWindow):
         worker.signals.success.connect(self.on_send_stego_success)
         worker.signals.error.connect(self.on_send_stego_error)
         worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        worker.signals.finished.connect(lambda: self.stego_send_button.setEnabled(True))
         self.running_workers.add(worker) # Hold reference
         self.threadpool.start(worker)
 
@@ -878,8 +903,50 @@ class MainWindow(QMainWindow):
         worker.signals.success.connect(self.on_reveal_stego_local_success)
         worker.signals.error.connect(self.on_reveal_stego_local_error)
         worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        worker.signals.finished.connect(lambda: self.stego_local_reveal_button.setEnabled(True))
         self.running_workers.add(worker) # Hold reference
         self.threadpool.start(worker)
+
+    # --- ADDED: Method to handle delete button click ---
+    @Slot()
+    def do_delete_item(self, item: dict, item_widget: QGroupBox):
+        """Shows confirm dialog and starts delete worker."""
+        item_id = item['id']
+        
+        # 1. Confirm
+        reply = QMessageBox.warning(
+            self,
+            "Confirm Delete",
+            f"Are you sure you want to permanently delete this item?\n(ID: {item_id})",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self.statusBar().showMessage(f"Deleting {item_id}...")
+        # Disable the widget while deleting
+        item_widget.setEnabled(False)
+
+        # 2. Define worker task
+        def delete_task(sess, item_id_to_delete):
+            api_delete_item(sess, item_id_to_delete)
+            return item_id_to_delete # Pass id to success handler
+        
+        # 3. Start worker
+        worker = Worker(delete_task, self.session, item_id)
+        # Pass item_widget to the success/error handlers
+        worker.signals.success.connect(
+            lambda deleted_id: self.on_delete_item_success(deleted_id, item_widget)
+        )
+        worker.signals.error.connect(
+            lambda e: self.on_delete_item_error(e, item_id, item_widget)
+        )
+        worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        self.running_workers.add(worker)
+        self.threadpool.start(worker)
+    # --- END ADD ---
 
 
     # -----------------------------------------------
@@ -888,7 +955,7 @@ class MainWindow(QMainWindow):
 
     @Slot(object, str)
     def on_login_success(self, token, username):
-        self.login_button.setEnabled(True)
+        # self.login_button.setEnabled(True) # Handled by 'finished' signal
         if not token:
             self.statusBar().showMessage("Invalid credentials.")
             self.show_error("Login Failed", "Invalid username or password.")
@@ -900,12 +967,12 @@ class MainWindow(QMainWindow):
 
     @Slot(Exception)
     def on_login_error(self, e):
-        self.login_button.setEnabled(True)
+        # self.login_button.setEnabled(True) # Handled by 'finished' signal
         self.show_error("Login Error", f"Could not log in: {e}")
 
     @Slot(object)
     def on_register_success(self, result):
-        self.reg_button.setEnabled(True)
+        # self.reg_button.setEnabled(True) # Handled by 'finished' signal
         ok, msg = result
         if ok:
             self.show_success("Registration Successful", "Account created. You can now log in.")
@@ -914,12 +981,12 @@ class MainWindow(QMainWindow):
 
     @Slot(Exception)
     def on_register_error(self, e):
-        self.reg_button.setEnabled(True)
+        # self.reg_button.setEnabled(True) # Handled by 'finished' signal
         self.show_error("Registration Error", f"Could not register: {e}")
 
     @Slot(object)
     def on_send_text_success(self, response_object):
-        self.send_text_button.setEnabled(True)
+        # self.send_text_button.setEnabled(True) # Handled by 'finished' signal
         self.show_success("Sent", f"Message sent successfully.\nID: {response_object.json().get('id')}")
         # Clear form
         self.send_message_text.clear()
@@ -927,12 +994,12 @@ class MainWindow(QMainWindow):
 
     @Slot(Exception)
     def on_send_text_error(self, e):
-        self.send_text_button.setEnabled(True)
+        # self.send_text_button.setEnabled(True) # Handled by 'finished' signal
         self.show_error("Send Error", f"Could not send message: {e}")
 
     @Slot(object)
     def on_inbox_success(self, inbox_list):
-        self.refresh_inbox_button.setEnabled(True)
+        # self.refresh_inbox_button.setEnabled(True) # Handled by 'finished' signal
         self.statusBar().showMessage(f"Inbox refreshed. {len(inbox_list)} items.")
         
         self.clear_inbox_layout()
@@ -947,12 +1014,12 @@ class MainWindow(QMainWindow):
 
     @Slot(Exception)
     def on_inbox_error(self, e):
-        self.refresh_inbox_button.setEnabled(True)
+        # self.refresh_inbox_button.setEnabled(True) # Handled by 'finished' signal
         self.show_error("Inbox Error", f"Could not load inbox: {e}")
 
     @Slot(object)
     def on_send_file_success(self, result_json):
-        self.send_file_button.setEnabled(True)
+        # self.send_file_button.setEnabled(True) # Handled by 'finished' signal
         self.show_success("File Sent", f"Encrypted file sent.\nID: {result_json.get('id')}")
         self.file_passphrase_edit.clear()
         self.file_path_label.setText("No file selected.")
@@ -960,24 +1027,24 @@ class MainWindow(QMainWindow):
 
     @Slot(Exception)
     def on_send_file_error(self, e):
-        self.send_file_button.setEnabled(True)
+        # self.send_file_button.setEnabled(True) # Handled by 'finished' signal
         self.show_error("Send File Error", f"Could not send file: {e}")
 
     @Slot(object)
     def on_send_stego_success(self, result_json):
-        self.stego_send_button.setEnabled(True)
+        # self.stego_send_button.setEnabled(True) # Handled by 'finished' signal
         self.show_success("Stego PNG Sent", f"Stego image sent.\nID: {result_json.get('id')}")
         self.stego_passphrase_edit.clear()
         self.stego_message_text.clear()
 
     @Slot(Exception)
     def on_send_stego_error(self, e):
-        self.stego_send_button.setEnabled(True)
+        # self.stego_send_button.setEnabled(True) # Handled by 'finished' signal
         self.show_error("Stego Send Error", f"Could not send stego image: {e}")
         
     @Slot(object)
     def on_reveal_stego_local_success(self, clear_text):
-        self.stego_local_reveal_button.setEnabled(True)
+        # self.stego_local_reveal_button.setEnabled(True) # Handled by 'finished' signal
         self.show_success("Reveal Successful", "Decrypted text from PNG:")
         # Show in a separate, scrollable message box
         msg_box = QMessageBox(self)
@@ -998,8 +1065,28 @@ class MainWindow(QMainWindow):
 
     @Slot(Exception)
     def on_reveal_stego_local_error(self, e):
-        self.stego_local_reveal_button.setEnabled(True)
+        # self.stego_local_reveal_button.setEnabled(True) # Handled by 'finished' signal
         self.show_error("Reveal Failed", f"Could not reveal/decrypt from PNG: {e}")
+
+    # --- ADDED: Callbacks for delete worker ---
+    @Slot(str, QWidget)
+    def on_delete_item_success(self, item_id: str, item_widget: QWidget):
+        self.statusBar().showMessage(f"Item {item_id} deleted successfully.")
+        # Remove the widget from the layout
+        item_widget.setParent(None)
+        item_widget.deleteLater()
+        
+        # Check if inbox is now empty
+        if self.inbox_layout.count() == 0:
+            self.inbox_layout.addWidget(QLabel("Inbox is empty."))
+
+    @Slot(Exception, str, QWidget)
+    def on_delete_item_error(self, e: Exception, item_id: str, item_widget: QWidget):
+        self.show_error("Delete Failed", f"Could not delete {item_id}: {e}")
+        # Re-enable the widget if it failed
+        item_widget.setEnabled(True)
+    # --- END ADD ---
+
 
     # ---------------------------------
     # --- DYNAMIC WIDGET CREATION ---
@@ -1047,6 +1134,11 @@ class MainWindow(QMainWindow):
         decrypt_file_btn = QPushButton("Fetch & Decrypt (File)")
         decrypt_stego_btn = QPushButton("Reveal & Decrypt (PNG)")
         
+        # --- ADDED: Delete button ---
+        delete_btn = QPushButton("Delete")
+        delete_btn.setObjectName("delete_button") # For styling
+        # --- END ADD ---
+
         buttons_layout.addWidget(raw_download_btn)
         
         # --- Conditional Visibility ---
@@ -1062,6 +1154,11 @@ class MainWindow(QMainWindow):
             # Assume file
             buttons_layout.addWidget(decrypt_file_btn)
             vkey_edit.setDisabled(True) # Not used for files
+
+        # --- ADDED: Add delete button to layout ---
+        buttons_layout.addStretch() # Pushes other buttons up
+        buttons_layout.addWidget(delete_btn)
+        # --- END ADD ---
 
         actions_layout.addWidget(decrypt_form, 1)
         actions_layout.addWidget(buttons_widget)
@@ -1087,6 +1184,13 @@ class MainWindow(QMainWindow):
                 item, "stego", passphrase_edit.text(), vkey_edit.text()
             )
         )
+        
+        # --- ADDED: Connect delete button ---
+        # We pass 'group_box' (the widget itself) so we can remove it on success
+        delete_btn.clicked.connect(
+            lambda: self.do_delete_item(item, group_box)
+        )
+        # --- END ADD ---
         
         return group_box
 
@@ -1124,6 +1228,13 @@ class MainWindow(QMainWindow):
             return
 
         self.statusBar().showMessage(f"Fetching and decrypting {item['id']}...")
+        
+        # --- ADDED: Disable the group box while processing ---
+        # Find the group box to disable it
+        item_widget = self.findChild(QGroupBox, f"item_group_{item['id']}")
+        if item_widget:
+            item_widget.setEnabled(False)
+        # --- END ADD ---
 
         def decrypt_task(sess, item_id, pw, vk, task_mode):
             """This function runs in the worker thread."""
@@ -1134,6 +1245,8 @@ class MainWindow(QMainWindow):
             # 2. Decrypt
             if task_mode == "text":
                 env = json.loads(blob.decode("utf-8", "strict"))
+                if "kdf" not in env or "salt_b64" not in env["kdf"]:
+                    raise ValueError("Envelope missing KDF salt")
                 salt = base64.b64decode(env["kdf"]["salt_b64"])
                 dk = derive_key_from_password(pw, salt)
                 clear_text = super_decrypt_text(env, vk, dk.key)
@@ -1149,6 +1262,8 @@ class MainWindow(QMainWindow):
             elif task_mode == "stego":
                 png_bytes = blob
                 env = reveal_env_from_png_bytes(png_bytes)
+                if "kdf" not in env or "salt_b64" not in env["kdf"]:
+                    raise ValueError("Envelope missing KDF salt")
                 salt = base64.b64decode(env["kdf"]["salt_b64"])
                 dk = derive_key_from_password(pw, salt)
                 clear_text = super_decrypt_text(env, vk, dk.key)
@@ -1160,10 +1275,22 @@ class MainWindow(QMainWindow):
         # --- Start worker ---
         worker = Worker(decrypt_task, self.session, item["id"], passphrase, vkey, mode)
         worker.signals.success.connect(self.on_decrypt_item_success)
+        # --- MODIFIED: Re-enable widget on error ---
         worker.signals.error.connect(
-             lambda e: self.show_error("Decrypt Failed", f"Could not decrypt {item['id']}: {e}")
+             lambda e: (
+                self.show_error("Decrypt Failed", f"Could not decrypt {item['id']}: {e}"),
+                item_widget.setEnabled(True) if item_widget else None
+             )
         )
-        worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        # --- MODIFIED: Re-enable widget on finish (if not successful) ---
+        worker.signals.finished.connect(
+            lambda: (
+                item_widget.setEnabled(True) if item_widget else None,
+                self.on_worker_finished(worker)
+            )
+        )
+        # --- END MOD ---
+
         self.running_workers.add(worker) # Hold reference
         self.threadpool.start(worker)
 
@@ -1183,6 +1310,7 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def on_decrypt_item_success(self, result: tuple):
         """Handles the successful result from the decrypt worker."""
+        # Note: Widget is re-enabled in the 'finished' signal
         mode, data = result
         
         self.statusBar().showMessage("Decryption successful.")
@@ -1263,6 +1391,13 @@ class MainWindow(QMainWindow):
                     self.show_success("File Saved", f"Decrypted file saved to {save_path}")
                 except Exception as e:
                     self.show_error("Save Failed", f"Could not save decrypted file: {e}")
+        
+        # --- MODIFIED: Refresh inbox after successful decrypt (if one-time) ---
+        # A bit of a lazy way, but ensures the UI is consistent
+        # A better way would be to check if the item was one-time
+        self.do_refresh_inbox()
+        # --- END MOD ---
+
 
 # ---------------------------------
 # --- APPLICATION ENTRY POINT ---
@@ -1299,6 +1434,16 @@ if __name__ == "__main__":
         QPushButton#refresh_inbox_button:hover {
             background-color: #218838;
         }
+        
+        /* --- ADDED: Style for the delete button --- */
+        QPushButton#delete_button {
+            background-color: #dc3545; /* A nice red */
+        }
+        QPushButton#delete_button:hover {
+            background-color: #c82333; /* A darker red */
+        }
+        /* --- END ADD --- */
+
         QLineEdit, QTextEdit, QSpinBox {
             border: 1px solid #cccccc;
             border-radius: 4px;
@@ -1312,7 +1457,3 @@ if __name__ == "__main__":
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
-
-
-
-
