@@ -25,6 +25,8 @@ import pathlib
 from dataclasses import dataclass
 from typing import Optional, Callable
 import traceback
+import asyncio
+import keyring
 
 # for pyinstall
 # Resolve paths both in normal Python and PyInstaller (_MEIPASS)
@@ -37,7 +39,7 @@ sys.path.insert(0, str(BASE))
 
 # --- Qt Imports ---
 from PySide6.QtCore import (
-    QObject, Signal, Slot, QRunnable, QThreadPool, Qt
+    QObject, Signal, Slot, QRunnable, QThreadPool, Qt, QStandardPaths
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -46,6 +48,10 @@ from PySide6.QtWidgets import (
     QGroupBox, QFrame, QGridLayout, QFormLayout, QDialog
 )
 from PySide6.QtGui import QIcon, QPixmap, QFont
+
+# --- Add app data paths ---
+CONFIG_DIR = pathlib.Path(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)) / "CipherDrop"
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- Networking ---
 import requests
@@ -64,6 +70,13 @@ except ImportError:
     # We'll let it crash later if they try to use it,
     # but this provides an initial warning.
     pass
+
+try:
+    from winrt.windows.security.credentials.ui import UserConsentVerifier, UserConsentVerifierAvailability
+    from winrt.windows.security.credentials.ui import UserConsentVerificationResult
+except ImportError:
+    print("WARNING: winrt-windows library not found. Biometric login will be disabled.")
+    UserConsentVerifier = None # So the app doesn't crash
 
 # ----------------------------------------------------------------------
 # ASYNCHRONOUS WORKER
@@ -211,6 +224,27 @@ def reveal_env_from_png_bytes(png_bytes: bytes) -> dict:
 # ----------------------------------------------------------------------
 
 class MainWindow(QMainWindow):
+    CONFIG_FILE = CONFIG_DIR / "app_config.json"  # Now uses the app data directory
+    
+    def _read_app_config(self) -> dict:
+        """Reads the app config JSON, returns defaults if not found."""
+        try:
+            if self.CONFIG_FILE.exists():
+                config_data = json.loads(self.CONFIG_FILE.read_text())
+                return config_data
+        except Exception as e:
+            print(f"Error reading config file: {e}")
+        
+        # Return defaults
+        return {"last_user": None, "biometrics_enabled": False}
+
+    def _write_app_config(self, config: dict):
+        """Writes the config dict to the JSON file."""
+        try:
+            self.CONFIG_FILE.write_text(json.dumps(config, indent=2))
+        except Exception as e:
+            print(f"Error writing config file: {e}")
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("CipherDrop")
@@ -234,6 +268,107 @@ class MainWindow(QMainWindow):
         # --- Init UI ---
         self.init_ui()
         self.update_ui_for_login_status()
+        self.try_biometric_login()
+
+    def on_biometrics_toggle(self, state: int):
+        """Handle the biometrics checkbox state change."""
+        if not self.session.username:  # Safety check
+            return
+            
+        config = self._read_app_config()
+        is_enabled = state == Qt.CheckState.Checked.value
+        config["biometrics_enabled"] = is_enabled
+        
+        try:
+            if is_enabled:
+                # Save the current token for biometric login
+                keyring.set_password("CipherDrop", self.session.username, self.session.token)
+                print(f"Biometrics enabled. Saved token for {self.session.username}")
+            else:
+                # Delete any saved token
+                keyring.delete_password("CipherDrop", self.session.username)
+                print(f"Biometrics disabled. Removed token for {self.session.username}")
+        except Exception as e:
+            print(f"Error managing keyring: {e}")
+            # If we couldn't save/delete the token, don't enable biometrics
+            if is_enabled:
+                config["biometrics_enabled"] = False
+                self.biometrics_toggle_check.setChecked(False)
+        
+        self._write_app_config(config)
+        
+    # vvvv ADD THIS NEW METHOD vvvv
+    def run_biometric_check(self) -> bool:
+        """
+        Runs the Windows Hello biometric check.
+        Returns True if successful, False otherwise.
+        """
+        if not UserConsentVerifier:
+            print("Biometric check skipped (winrt library not loaded).")
+            return False
+
+        async def check_async():
+            try:
+                # 1. Check if biometrics are even set up
+                availability = await UserConsentVerifier.check_availability_async()
+                if availability != UserConsentVerifierAvailability.AVAILABLE:
+                    print("Biometrics not available.")
+                    return False
+
+                # 2. Pop the Windows Hello dialog
+                prompt = "Sign in to CipherDrop"
+                result = await UserConsentVerifier.request_verification_async(prompt)
+                
+                # 3. Check the result
+                return result == UserConsentVerificationResult.VERIFIED
+                
+            except Exception as e:
+                print(f"Biometric check failed: {e}")
+                return False
+
+        # Run the async function from our sync code
+        try:
+            # This is the simplest way to run it.
+            return asyncio.run(check_async())
+        except RuntimeError as e:
+            # This can happen if an event loop is already running
+            print(f"Could not run biometric check: {e}")
+            return False
+    # ^^^^ END OF NEW METHOD ^^^^
+    
+    def try_biometric_login(self):
+        """Checks for a saved token and attempts biometric unlock."""
+        if self.session.token:
+            return
+
+        try:
+            config = self._read_app_config()
+            username = config.get("last_user")
+            biometrics_enabled = config.get("biometrics_enabled", False)
+
+            if not username or not biometrics_enabled:
+                # No last user or biometrics are explicitly disabled
+                if not biometrics_enabled:
+                    print("Biometric login disabled by user preference.")
+                return
+
+            print(f"Found last user: {username}")
+            saved_token = keyring.get_password("CipherDrop", username)
+
+            if saved_token:
+                print("Found saved token. Requesting biometric unlock...")
+                if self.run_biometric_check():
+                    print("Biometric unlock successful!")
+                    self.session.token = saved_token
+                    self.session.username = username
+                    self.update_ui_for_login_status()
+                else:
+                    print("Biometric unlock failed or was cancelled.")
+            else:
+                print("No token found in keyring for last user (may have been deleted).")
+                
+        except Exception as e:
+            print(f"Error during biometric login attempt: {e}")
 
     def init_ui(self):
         # --- Main Layout ---
@@ -288,6 +423,11 @@ class MainWindow(QMainWindow):
         # Login Tab
         login_layout = QFormLayout(login_tab)
         self.login_user_edit = QLineEdit()
+        # Pre-fill with last username if available
+        config = self._read_app_config()
+        if last_user := config.get("last_user"):
+            self.login_user_edit.setText(last_user)
+            
         self.login_pass_edit = QLineEdit(echoMode=QLineEdit.Password)
         self.login_button = QPushButton("Login")
         login_layout.addRow("Username:", self.login_user_edit)
@@ -315,8 +455,15 @@ class MainWindow(QMainWindow):
         logged_in_layout.setContentsMargins(0,0,0,0)
         self.logged_in_label = QLabel("Signed in as...")
         self.logged_in_label.setWordWrap(True)
+        
+        # Add biometrics toggle checkbox
+        self.biometrics_toggle_check = QCheckBox("Enable Biometric Unlock")
+        self.biometrics_toggle_check.setChecked(False)  # We'll load the real value later
+        self.biometrics_toggle_check.stateChanged.connect(self.on_biometrics_toggle)
+
         self.logout_button = QPushButton("Logout")
         logged_in_layout.addWidget(self.logged_in_label)
+        logged_in_layout.addWidget(self.biometrics_toggle_check)
         logged_in_layout.addWidget(self.logout_button)
 
         # Add both to account layout and hide one
@@ -573,6 +720,11 @@ class MainWindow(QMainWindow):
         
         if is_logged_in:
             self.logged_in_label.setText(f"Signed in as:\n**{self.session.username}**")
+            
+            # Set the checkbox state from config
+            config = self._read_app_config()
+            self.biometrics_toggle_check.setChecked(config.get("biometrics_enabled", False))
+            
             self.statusBar().showMessage("Ready.")
             # Auto-refresh inbox on login
             self.do_refresh_inbox()
@@ -660,6 +812,24 @@ class MainWindow(QMainWindow):
     @Slot()
     def do_logout(self):
         """Logs the user out and resets UI."""
+        
+        if self.session.username:
+            # Save the username in config before logout (but don't change other settings)
+            config = self._read_app_config()
+            config["last_user"] = self.session.username
+            self._write_app_config(config)
+            
+            # Delete the stored token if it exists
+            try:
+                keyring.delete_password("CipherDrop", self.session.username)
+                print(f"Logged out. Removed token for {self.session.username}.")
+            except keyring.errors.NoKeyringError:
+                print("No keyring service found to delete from.")
+            except keyring.errors.PasswordDeleteError:
+                print(f"No token found for {self.session.username} to delete, or delete failed.")
+            except Exception as e:
+                print(f"Error deleting token from keyring on logout: {e}")
+
         self.session.token = None
         self.session.username = None
         self.update_ui_for_login_status()
@@ -975,6 +1145,49 @@ class MainWindow(QMainWindow):
         else:
             self.session.token = token
             self.session.username = username
+            
+            # Handle biometric settings
+            config = self._read_app_config()  # Get existing config
+            config["last_user"] = username
+            
+            if self.biometrics_toggle_check.isChecked():
+                # User wants biometrics
+                try:
+                    keyring.set_password("CipherDrop", username, token)
+                    config["biometrics_enabled"] = True
+                    print(f"Token saved to keyring for {username}")
+                except Exception as e:
+                    print(f"WARNING: Could not save token to keyring: {e}")
+                    config["biometrics_enabled"] = False  # Failed, so don't set it
+            else:
+                # User does not want biometrics
+                config["biometrics_enabled"] = False
+                try:
+                    # Explicitly delete any old token
+                    keyring.delete_password("CipherDrop", username)
+                    print(f"Biometrics disabled. Removed token for {username}.")
+                except keyring.errors.NoKeyringError:
+                    print("No keyring service found to delete from.")
+                except keyring.errors.PasswordDeleteError:
+                    print(f"No token found for {username} to delete, or delete failed.")
+                except Exception as e:
+                    print(f"Error deleting token from keyring: {e}")
+
+            self._write_app_config(config)
+            self.update_ui_for_login_status()
+            self.statusBar().showMessage("Logged in successfully.")
+            
+            try:
+                # Save the token to Windows Credential Manager
+                keyring.set_password("CipherDrop", username, token)
+                # We also need to remember *who* logged in.
+                # Write to app data directory
+                (CONFIG_DIR / "last_user.cfg").write_text(username)
+                print(f"Token saved to keyring for {username}")
+            except Exception as e:
+                print(f"WARNING: Could not save token to keyring: {e}")
+            # ^^^^ END OF NEW BLOCK ^^^^
+
             self.update_ui_for_login_status()
             self.statusBar().showMessage("Logged in successfully.")
 

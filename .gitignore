@@ -13,3 +13,5 @@ cipherapp.spec
 keyringtest.py
 cipherdrop.zip
 .env
+last_user.cfg
+app_config.json
