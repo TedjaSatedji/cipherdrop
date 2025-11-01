@@ -298,9 +298,11 @@ class MainWindow(QMainWindow):
         reg_layout = QFormLayout(reg_tab)
         self.reg_user_edit = QLineEdit()
         self.reg_pass_edit = QLineEdit(echoMode=QLineEdit.Password)
+        self.reg_pass_confirm_edit = QLineEdit(echoMode=QLineEdit.Password)
         self.reg_button = QPushButton("Create Account")
         reg_layout.addRow("New Username:", self.reg_user_edit)
         reg_layout.addRow("New Password:", self.reg_pass_edit)
+        reg_layout.addRow("Confirm Password:", self.reg_pass_confirm_edit)
         reg_layout.addWidget(self.reg_button)
 
         auth_tabs.addTab(login_tab, "Login")
@@ -689,8 +691,14 @@ class MainWindow(QMainWindow):
         """Starts the register worker thread."""
         username = self.reg_user_edit.text()
         password = self.reg_pass_edit.text()
+        confirm_password = self.reg_pass_confirm_edit.text()
+        
         if not username or not password:
             self.show_error("Registration Failed", "Username and password are required.")
+            return
+            
+        if password != confirm_password:
+            self.show_error("Registration Failed", "Passwords do not match. Please try again.")
             return
 
         self.statusBar().showMessage("Registering...")
@@ -981,6 +989,9 @@ class MainWindow(QMainWindow):
         ok, msg = result
         if ok:
             self.show_success("Registration Successful", "Account created. You can now log in.")
+            # Clear the password fields
+            self.reg_pass_edit.clear()
+            self.reg_pass_confirm_edit.clear()
         else:
             self.show_error("Registration Failed", msg)
 
