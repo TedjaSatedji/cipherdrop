@@ -1,5 +1,3 @@
-(Here is the complete `README.md` file, formatted to be copied directly to GitHub.)
-
 -----
 
 # 🔐 CipherDrop Desktop
