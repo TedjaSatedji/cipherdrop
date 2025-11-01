@@ -11,3 +11,6 @@ CipherDrop.spec
 __pycache__/server.cpython-310.pyc
 icon/Cyber-Cage.ico
 cipherapp.spec
+keyringtest.py
+cipherdrop.zip
+.gitignore

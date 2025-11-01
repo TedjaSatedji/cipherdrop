@@ -24,7 +24,7 @@ Base = declarative_base()
 
 def _now():
     # naive UTC to match what SQLite returns
-    return datetime.utcnow()
+    return datetime.utcnow() + timedelta(hours=7)
 def _gen_id(n=8): return secrets.token_urlsafe(n)[:12]
 def _ttl_minutes(default=30):
     try: return int(os.getenv("TTL_MIN", default))
