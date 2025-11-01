@@ -14,7 +14,16 @@ from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from auth.login import make_login_hash, verify_login_hash
 import jwt
 
+from dotenv import load_dotenv
+load_dotenv()
+
 JWT_SECRET = os.getenv("JWT_SECRET","dev-secret-change-me")
+
+if JWT_SECRET == "dev-secret-change-me":
+    print("!!! WARNING: SERVER IS USING THE DEFAULT DEV SECRET !!!")
+else:
+    print("Server is using your custom secret.")
+    
 JWT_ISS = "cipherdrop"
 DB_URL = "sqlite:///./dropbox.db"
 
