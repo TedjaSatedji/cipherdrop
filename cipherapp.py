@@ -378,7 +378,7 @@ class MainWindow(QMainWindow):
         self.send_vkey_edit = QLineEdit("CRYPTO")
         self.send_ttl_spinbox = QSpinBox(minimum=5, maximum=1440, value=30, singleStep=5)
         self.send_onetime_check = QCheckBox("One-time read (delete after first open)")
-        self.send_onetime_check.setChecked(True)
+        self.send_onetime_check.setChecked(False)
         
         form_layout.addWidget(QLabel("Recipient Username:"), 0, 0)
         form_layout.addWidget(self.send_to_user_edit, 0, 1)
@@ -449,7 +449,7 @@ class MainWindow(QMainWindow):
         self.file_passphrase_edit = QLineEdit(echoMode=QLineEdit.Password)
         self.file_ttl_spinbox = QSpinBox(minimum=5, maximum=1440, value=30, singleStep=5)
         self.file_onetime_check = QCheckBox("One-time read")
-        self.file_onetime_check.setChecked(True)
+        self.file_onetime_check.setChecked(False)
         
         form_layout.addRow("Recipient Username:", self.file_to_user_edit)
         form_layout.addRow("Shared Passphrase:", self.file_passphrase_edit)
@@ -488,7 +488,7 @@ class MainWindow(QMainWindow):
         self.stego_vkey_edit = QLineEdit("CRYPTO")
         self.stego_ttl_spinbox = QSpinBox(minimum=5, maximum=1440, value=30, singleStep=5)
         self.stego_onetime_check = QCheckBox("One-time read")
-        self.stego_onetime_check.setChecked(True)
+        self.stego_onetime_check.setChecked(False)
 
         form_layout.addRow("Recipient Username:", self.stego_to_user_edit)
         form_layout.addRow("Shared Passphrase:", self.stego_passphrase_edit)
