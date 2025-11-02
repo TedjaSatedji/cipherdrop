@@ -41,7 +41,7 @@ sys.path.insert(0, str(BASE))
 
 # --- Qt Imports ---
 from PySide6.QtCore import (
-    QObject, Signal, Slot, QRunnable, QThreadPool, Qt, QStandardPaths
+    QObject, Signal, Slot, QRunnable, QThreadPool, Qt, QStandardPaths, QTimer
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -423,6 +423,10 @@ class MainWindow(QMainWindow):
         self.session = Session(api=os.environ.get("CIPHERDROP_API",  "https://fyuko.dev"))
         self.threadpool = QThreadPool()
         self.running_workers = set()
+        
+        self.inbox_refresh_timer = QTimer(self)
+        self.inbox_refresh_timer.setInterval(5000)
+        self.inbox_refresh_timer.timeout.connect(self.do_refresh_inbox)
         
         # --- Store file paths for uploads ---
         self.send_file_path = None
@@ -1027,6 +1031,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"Error deleting token from keyring on logout: {e}")
 
+        self.inbox_refresh_timer.stop()
         self.session.token = None
         self.session.username = None
         self.update_ui_for_login_status()
@@ -1200,6 +1205,14 @@ class MainWindow(QMainWindow):
     @Slot()
     def do_refresh_inbox(self):
         """Starts the inbox refresh worker."""
+        
+        # --- THIS IS THE ANTI-STACKING CHECK ---
+        # If the button is *already* disabled, it means a refresh
+        # is in progress. Don't start another one.
+        if not self.refresh_inbox_button.isEnabled():
+            return
+        # --- END OF CHECK ---
+        
         self.statusBar().showMessage("Refreshing inbox...")
         self.refresh_inbox_button.setEnabled(False)
         
@@ -1207,7 +1220,11 @@ class MainWindow(QMainWindow):
         worker.signals.success.connect(self.on_inbox_success)
         worker.signals.error.connect(self.on_inbox_error)
         worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        
+        # This is the line you wanted to retain, which is perfect.
+        # It re-enables the button when the worker is done.
         worker.signals.finished.connect(lambda: self.refresh_inbox_button.setEnabled(True))
+        
         self.running_workers.add(worker) # Hold reference
         self.threadpool.start(worker)
 
@@ -1487,9 +1504,8 @@ class MainWindow(QMainWindow):
         # and set the checkbox state properly.
         self.update_ui_for_login_status()
         self.statusBar().showMessage("Logged in successfully.")
-        
-        # (I also removed a duplicated block of code that was
-        # here, as it was redundant with the logic above)
+        self.inbox_refresh_timer.start()
+
 
     @Slot(Exception)
     def on_login_error(self, e):
