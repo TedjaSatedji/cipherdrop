@@ -47,7 +47,8 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QTabWidget, QLabel, QTextEdit, QSpinBox,
     QCheckBox, QFileDialog, QMessageBox, QStatusBar, QScrollArea,
-    QGroupBox, QFrame, QGridLayout, QFormLayout, QDialog
+    QGroupBox, QFrame, QGridLayout, QFormLayout, QDialog, QComboBox,
+    QListWidget, QListWidgetItem
 )
 from PySide6.QtGui import QIcon, QPixmap, QFont
 
@@ -340,6 +341,74 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Error writing config file: {e}")
 
+    def _get_contacts_file(self) -> pathlib.Path:
+        """Returns the path to the contacts file for the current user."""
+        if not self.session.username:
+            return CONFIG_DIR / "contacts.json"
+        return CONFIG_DIR / f"contacts_{self.session.username}.json"
+
+    def _load_contacts(self) -> list:
+        """Loads contacts list for the current user."""
+        contacts_file = self._get_contacts_file()
+        try:
+            if contacts_file.exists():
+                contacts_data = json.loads(contacts_file.read_text())
+                return contacts_data.get("contacts", [])
+        except Exception as e:
+            print(f"Error reading contacts file: {e}")
+        return []
+
+    def _save_contacts(self, contacts: list):
+        """Saves contacts list for the current user."""
+        contacts_file = self._get_contacts_file()
+        try:
+            contacts_file.write_text(json.dumps({"contacts": contacts}, indent=2))
+        except Exception as e:
+            print(f"Error writing contacts file: {e}")
+
+    def _add_contact(self, username: str) -> bool:
+        """Adds a contact to the list. Returns True if added, False if already exists."""
+        contacts = self._load_contacts()
+        username_clean = username.strip()
+        if not username_clean:
+            return False
+        if username_clean not in contacts:
+            contacts.append(username_clean)
+            self._save_contacts(contacts)
+            return True
+        return False
+
+    def _remove_contact(self, username: str):
+        """Removes a contact from the list."""
+        contacts = self._load_contacts()
+        if username in contacts:
+            contacts.remove(username)
+            self._save_contacts(contacts)
+
+    def _refresh_contacts_ui(self):
+        """Refreshes all contact-related UI elements with current contacts."""
+        contacts = self._load_contacts()
+        
+        # Update all comboboxes
+        for combo in [self.send_to_user_edit, self.file_to_user_edit, self.stego_to_user_edit]:
+            if isinstance(combo, QComboBox):
+                current_text = combo.currentText()
+                combo.clear()
+                combo.setEditable(True)
+                combo.addItem("")  # Empty option
+                combo.addItems(contacts)
+                # Restore current text if it was a contact
+                if current_text in contacts:
+                    combo.setCurrentText(current_text)
+                else:
+                    combo.setEditText(current_text)
+        
+        # Update contacts list widget
+        if hasattr(self, 'contacts_list_widget'):
+            self.contacts_list_widget.clear()
+            for contact in contacts:
+                self.contacts_list_widget.addItem(contact)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("CipherDrop")
@@ -359,6 +428,9 @@ class MainWindow(QMainWindow):
         self.send_file_path = None
         self.stego_cover_png_path = None
         self.stego_local_png_path = None
+
+        # --- Contacts storage ---
+        self.contacts_list = []
 
         # --- Init UI ---
         self.init_ui()
@@ -562,6 +634,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.create_inbox_tab(), "Inbox")
         tabs.addTab(self.create_compose_tab(), "Compose")
         tabs.addTab(self.create_stego_decrypt_tab(), "Local Decrypt")
+        tabs.addTab(self.create_contacts_tab(), "Contacts")
         
         # Disable tabs until logged in
         tabs.setEnabled(False)
@@ -668,7 +741,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(header)
 
         form_layout = QFormLayout()
-        self.file_to_user_edit = QLineEdit()
+        self.file_to_user_edit = QLineEdit()  # Allow typing new usernames
         self.file_passphrase_edit = QLineEdit(echoMode=QLineEdit.Password)
         self.file_ttl_spinbox = QSpinBox(minimum=5, maximum=1440, value=30, singleStep=5)
         self.file_onetime_check = QCheckBox("One-time read")
@@ -782,6 +855,45 @@ class MainWindow(QMainWindow):
         
         return widget
 
+    def create_contacts_tab(self) -> QWidget:
+        """Creates the Contacts management tab."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        header = QLabel("Manage Contacts")
+        header.setFont(QFont("Inter", 16, QFont.Weight.Bold))
+        layout.addWidget(header)
+        
+        # NEW: Use-in-Compose button
+        self.use_contact_button = QPushButton("Use Selected in Compose…")
+        self.use_contact_button.clicked.connect(self.do_use_contact_in_compose)
+        
+        # --- Add Contact Section ---
+        add_contact_group = QGroupBox("Add Contact")
+        add_contact_layout = QHBoxLayout()
+        self.add_contact_edit = QLineEdit(placeholderText="Enter username...")
+        self.add_contact_button = QPushButton("Add Contact")
+        self.add_contact_button.clicked.connect(self.do_add_contact)
+        add_contact_layout.addWidget(self.add_contact_edit)
+        add_contact_layout.addWidget(self.add_contact_button)
+        add_contact_group.setLayout(add_contact_layout)
+        layout.addWidget(add_contact_group)
+        
+        # --- Contacts List ---
+        contacts_list_group = QGroupBox("Your Contacts")
+        contacts_list_layout = QVBoxLayout()
+        self.contacts_list_widget = QListWidget()
+        self.remove_contact_button = QPushButton("Remove Selected Contact")
+        self.remove_contact_button.clicked.connect(self.do_remove_contact)
+        contacts_list_layout.addWidget(self.contacts_list_widget)
+        contacts_list_layout.addWidget(self.use_contact_button)   
+        contacts_list_layout.addWidget(self.remove_contact_button)
+        contacts_list_group.setLayout(contacts_list_layout)
+        layout.addWidget(contacts_list_group, 1)  # Stretch factor
+        
+        layout.addStretch()
+        return widget
+
     # ---------------------------------
     # --- UI State & Helper Methods ---
     # ---------------------------------
@@ -801,6 +913,9 @@ class MainWindow(QMainWindow):
             config = self._read_app_config()
             self.biometrics_toggle_check.setChecked(config.get("biometrics_enabled", False))
             
+            # Load and refresh contacts UI
+            self._refresh_contacts_ui()
+            
             self.statusBar().showMessage("Ready.")
             # Auto-refresh inbox on login
             self.do_refresh_inbox()
@@ -809,6 +924,12 @@ class MainWindow(QMainWindow):
             # Clear inbox
             self.clear_inbox_layout()
             self.inbox_layout.addWidget(QLabel("Please log in to see your inbox."))
+            # Clear contacts UI
+            if hasattr(self, 'contacts_list_widget'):
+                self.contacts_list_widget.clear()
+            for combo_name in ['send_to_user_edit', 'file_to_user_edit', 'stego_to_user_edit']:
+                if hasattr(self, combo_name):
+                    combo = getattr(self, combo_name)
 
     def clear_inbox_layout(self):
         """Removes all widgets from the inbox layout."""
@@ -956,6 +1077,47 @@ class MainWindow(QMainWindow):
         worker.signals.finished.connect(lambda: self.login_button.setEnabled(True))
         self.running_workers.add(worker) # Hold reference
         self.threadpool.start(worker)
+        
+    @Slot()
+    def do_use_contact_in_compose(self):
+        """Confirm and auto-fill recipient fields in Compose from selected contact."""
+        current_item = self.contacts_list_widget.currentItem() if hasattr(self, 'contacts_list_widget') else None
+        if not current_item:
+            self.show_error("Use in Compose", "Please select a contact first.")
+            return
+    
+        username = current_item.text().strip()
+        if not username:
+            self.show_error("Use in Compose", "Selected contact is empty.")
+            return
+    
+        # Confirm
+        reply = QMessageBox.question(
+            self,
+            "Use in Compose",
+            f"Use \"{username}\" as the recipient in Compose?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+    
+        # Fill all Compose recipient fields (supports QLineEdit or legacy QComboBox)
+        for field in [self.send_to_user_edit, self.file_to_user_edit, self.stego_to_user_edit]:
+            if isinstance(field, QLineEdit):
+                field.setText(username)
+            elif isinstance(field, QComboBox):
+                idx = field.findText(username, Qt.MatchFlag.MatchExactly)
+                field.setCurrentIndex(idx if idx >= 0 else field.currentIndex())
+                if idx < 0:
+                    field.setEditText(username)
+    
+        # Jump to Compose tab
+        if isinstance(self.main_tabs, QTabWidget):
+            self.main_tabs.setCurrentIndex(1)
+    
+        self.statusBar().showMessage(f"Recipient set to {username} in Compose.")
+
 
     @Slot()
     def do_register(self):
@@ -986,7 +1148,11 @@ class MainWindow(QMainWindow):
     @Slot()
     def do_send_text(self):
         """Validates form and starts the send_text worker."""
-        to_user = self.send_to_user_edit.text()
+        to_user = (
+        self.send_to_user_edit.text()
+        if hasattr(self, "send_to_user_edit")
+        else ""
+        )
         passphrase = self.send_passphrase_edit.text()
         message = self.send_message_text.toPlainText()
         vkey = self.send_vkey_edit.text()
@@ -996,6 +1162,11 @@ class MainWindow(QMainWindow):
         if not to_user or not passphrase or not message:
             self.show_error("Send Failed", "Recipient, passphrase, and message are required.")
             return
+        
+        # Auto-add recipient to contacts
+        if to_user.strip():
+            self._add_contact(to_user.strip())
+            self._refresh_contacts_ui()
 
         self.statusBar().showMessage("Encrypting and sending...")
         self.send_text_button.setEnabled(False)
@@ -1043,13 +1214,18 @@ class MainWindow(QMainWindow):
     @Slot()
     def do_send_file(self):
         """Validates and starts the send_file worker."""
-        to_user = self.file_to_user_edit.text()
+        to_user = self.file_to_user_edit.currentText() if isinstance(self.file_to_user_edit, QComboBox) else self.file_to_user_edit.text()
         passphrase = self.file_passphrase_edit.text()
         file_path = self.send_file_path
         
         if not to_user or not passphrase or not file_path:
             self.show_error("Send Failed", "Recipient, passphrase, and a selected file are required.")
             return
+        
+        # Auto-add recipient to contacts
+        if to_user.strip():
+            self._add_contact(to_user.strip())
+            self._refresh_contacts_ui()
 
         self.statusBar().showMessage("Encrypting and sending file...")
         self.send_file_button.setEnabled(False)
@@ -1100,7 +1276,7 @@ class MainWindow(QMainWindow):
     @Slot()
     def do_send_stego(self):
         """Validates and starts the stego_send worker."""
-        to_user = self.stego_to_user_edit.text()
+        to_user = self.stego_to_user_edit.currentText() if isinstance(self.stego_to_user_edit, QComboBox) else self.stego_to_user_edit.text()
         passphrase = self.stego_passphrase_edit.text()
         vkey = self.stego_vkey_edit.text()
         message = self.stego_message_text.toPlainText()
@@ -1109,6 +1285,11 @@ class MainWindow(QMainWindow):
         if not (to_user and passphrase and vkey and message and cover_path):
             self.show_error("Send Failed", "All fields and a cover PNG are required.")
             return
+        
+        # Auto-add recipient to contacts
+        if to_user.strip():
+            self._add_contact(to_user.strip())
+            self._refresh_contacts_ui()
 
         self.statusBar().showMessage("Encrypting, hiding, and sending...")
         self.stego_send_button.setEnabled(False)
@@ -1232,6 +1413,34 @@ class MainWindow(QMainWindow):
         self.threadpool.start(worker)
     # --- END ADD ---
 
+    @Slot()
+    def do_add_contact(self):
+        """Adds a contact from the input field."""
+        username = self.add_contact_edit.text().strip()
+        if not username:
+            self.show_error("Add Contact", "Please enter a username.")
+            return
+        
+        if self._add_contact(username):
+            self.show_success("Contact Added", f"Added {username} to your contacts.")
+            self.add_contact_edit.clear()
+            self._refresh_contacts_ui()
+        else:
+            self.show_error("Add Contact", f"{username} is already in your contacts.")
+
+    @Slot()
+    def do_remove_contact(self):
+        """Removes the selected contact from the list."""
+        current_item = self.contacts_list_widget.currentItem()
+        if not current_item:
+            self.show_error("Remove Contact", "Please select a contact to remove.")
+            return
+        
+        username = current_item.text()
+        self._remove_contact(username)
+        self.show_success("Contact Removed", f"Removed {username} from your contacts.")
+        self._refresh_contacts_ui()
+
 
     # -----------------------------------------------
     # --- "ON" METHODS (Worker -> GUI Callbacks) ---
@@ -1332,6 +1541,17 @@ class MainWindow(QMainWindow):
         # self.refresh_inbox_button.setEnabled(True) # Handled by 'finished' signal
         self.statusBar().showMessage(f"Inbox refreshed. {len(inbox_list)} items.")
         
+        # Auto-add senders from inbox to contacts
+        contacts_updated = False
+        for item in inbox_list:
+            sender = item.get('from_user', '').strip()
+            if sender and sender != self.session.username:
+                if self._add_contact(sender):
+                    contacts_updated = True
+        
+        if contacts_updated:
+            self._refresh_contacts_ui()
+        
         self.clear_inbox_layout()
         
         if not inbox_list:
@@ -1430,6 +1650,31 @@ class MainWindow(QMainWindow):
         group_box = QGroupBox(title)
         group_layout = QVBoxLayout(group_box)
         
+        # --- Determine item type for icon ---
+        is_text_env = (item.get("mime","").startswith("application/json")
+                       or str(item.get("filename","")).lower().endswith(".json"))
+        is_png = (item.get("mime","") == "image/png") or str(item.get("filename","")).lower().endswith(".png")
+        
+        # --- NEW ICON LOGIC ---
+        icon_label = QLabel()
+        icon_path = ""
+        if is_text_env:
+            icon_path = str(BASE / "icon/icon_text.png") 
+        elif is_png:
+            icon_path = str(BASE / "icon/icon_stego.png")
+        else:
+            icon_path = str(BASE / "icon/icon_file.png")
+
+        pixmap = QPixmap(icon_path)
+        if not pixmap.isNull():
+            icon_label.setPixmap(pixmap.scaled(32, 32, Qt.AspectRatioMode.KeepAspectRatio))
+
+        # Add the icon next to the title (or wherever you like!)
+        # You might need a simple QHBoxLayout here to put the icon and title together
+        # For now, we'll just add it at the top of the group.
+        group_layout.addWidget(icon_label) 
+        # --- END NEW LOGIC ---
+        
         # --- Metadata ---
         meta_layout = QGridLayout()
         meta_layout.addWidget(QLabel("Created:"), 0, 0)
@@ -1472,10 +1717,7 @@ class MainWindow(QMainWindow):
         buttons_layout.addWidget(raw_download_btn)
         
         # --- Conditional Visibility ---
-        is_text_env = (item.get("mime","").startswith("application/json")
-                       or str(item.get("filename","")).lower().endswith(".json"))
-        is_png = (item.get("mime","") == "image/png") or str(item.get("filename","")).lower().endswith(".png")
-        
+        # (is_text_env and is_png are already determined above for the icon)
         if is_text_env:
             buttons_layout.addWidget(decrypt_text_btn)
         elif is_png:
