@@ -375,20 +375,7 @@ def welcome():
             
             <a href="/docs" class="cta-button">Explore API Documentation</a>
             
-            <div class="features">
-                <div class="feature">
-                    <h3>🔐 End-to-End Encryption</h3>
-                    <p>Your files are protected with state-of-the-art encryption methods.</p>
-                </div>
-                <div class="feature">
-                    <h3>⚡ Fast & Secure</h3>
-                    <p>Quick file transfers with built-in security features.</p>
-                </div>
-                <div class="feature">
-                    <h3>🌐 Web-Based</h3>
-                    <p>Access your files from anywhere with our web interface.</p>
-                </div>
-            </div>
+            
         </div>
     </body>
     </html>
