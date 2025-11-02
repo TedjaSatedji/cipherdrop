@@ -20,6 +20,7 @@ import base64
 import json
 import os
 import sys
+import subprocess
 import tempfile
 import pathlib
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from typing import Optional, Callable
 import traceback
 import asyncio
 import keyring
+import ctypes
 
 # for pyinstall
 # Resolve paths both in normal Python and PyInstaller (_MEIPASS)
@@ -77,6 +79,68 @@ try:
 except ImportError:
     print("WARNING: winrt-windows library not found. Biometric login will be disabled.")
     UserConsentVerifier = None # So the app doesn't crash
+
+# --- HELPER MODE: run Windows Hello then exit with code ---
+def _hello_helper_main() -> int:
+    """
+    Windowed helper path that ONLY runs Windows Hello and exits.
+    Return codes: 0 = verified, 1 = denied/cancelled, 2 = unavailable/error.
+    """
+    try:
+        # Import here so main app can still run without winrt installed.
+        from winrt.windows.security.credentials.ui import (
+            UserConsentVerifier, UserConsentVerifierAvailability, UserConsentVerificationResult
+        )
+    except Exception:
+        return 2
+
+    import asyncio
+
+    async def go():
+        avail = await UserConsentVerifier.check_availability_async()
+        if avail != UserConsentVerifierAvailability.AVAILABLE:
+            return 2
+        res = await UserConsentVerifier.request_verification_async("Sign in to CipherDrop")
+        return 0 if res == UserConsentVerificationResult.VERIFIED else 1
+
+    try:
+        try:
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(go())
+        except RuntimeError:
+            # no loop yet
+            return asyncio.run(go())
+    except Exception:
+        return 2
+
+def _hello_available_main() -> int:
+    """
+    Exit 0 if Windows Hello is AVAILABLE, else 2.
+    """
+    try:
+        from winrt.windows.security.credentials.ui import (
+            UserConsentVerifier, UserConsentVerifierAvailability
+        )
+    except Exception:
+        return 2
+
+    import asyncio
+
+    async def go():
+        try:
+            avail = await UserConsentVerifier.check_availability_async()
+            return 0 if avail == UserConsentVerifierAvailability.AVAILABLE else 2
+        except Exception:
+            return 2
+
+    try:
+        try:
+            loop = asyncio.get_event_loop()
+            return loop.run_until_complete(go())
+        except RuntimeError:
+            return asyncio.run(go())
+    except Exception:
+        return 2
 
 # ----------------------------------------------------------------------
 # ASYNCHRONOUS WORKER
@@ -220,6 +284,37 @@ def reveal_env_from_png_bytes(png_bytes: bytes) -> dict:
     return env
 
 # ----------------------------------------------------------------------
+# WINDOWS HELLO UTILITY FUNCTIONS
+# ----------------------------------------------------------------------
+
+def hello_is_available() -> bool:
+    try:
+        # In PyInstaller bundle, sys.executable is the exe; in script mode, use __file__
+        if getattr(sys, '_MEIPASS', None):
+            # Bundled mode: sys.executable is the exe
+            rc = subprocess.run([sys.executable, "--hello-available"]).returncode
+        else:
+            # Script mode: need to pass script file
+            rc = subprocess.run([sys.executable, __file__, "--hello-available"]).returncode
+        return rc == 0
+    except Exception:
+        return False  # be conservative if anything fails
+
+def run_hello_via_self_helper() -> bool:
+    try:
+        ctypes.windll.user32.AllowSetForegroundWindow(-1)
+    except Exception:
+        pass
+    # In PyInstaller bundle, sys.executable is the exe; in script mode, use __file__
+    if getattr(sys, '_MEIPASS', None):
+        # Bundled mode: sys.executable is the exe
+        rc = subprocess.run([sys.executable, "--hello-helper"]).returncode
+    else:
+        # Script mode: need to pass script file
+        rc = subprocess.run([sys.executable, __file__, "--hello-helper"]).returncode
+    return rc == 0
+
+# ----------------------------------------------------------------------
 # MAIN APPLICATION WINDOW
 # ----------------------------------------------------------------------
 
@@ -268,14 +363,24 @@ class MainWindow(QMainWindow):
         # --- Init UI ---
         self.init_ui()
         self.update_ui_for_login_status()
+        # Kill auto-prompt on startup (just in case) - only the button triggers Hello
+        # self.try_biometric_login()
 
     def on_biometrics_toggle(self, state: int):
         """Handle the biometrics checkbox state change."""
         if not self.session.username:  # Safety check
             return
+        
+        enable = state == Qt.CheckState.Checked.value
+
+        if enable and not hello_is_available():
+            self.show_error("Windows Hello", "Windows Hello isn't available on this device/account.")
+            # flip the checkbox back off
+            self.biometrics_toggle_check.setChecked(False)
+            return
             
         config = self._read_app_config()
-        is_enabled = state == Qt.CheckState.Checked.value
+        is_enabled = enable
         config["biometrics_enabled"] = is_enabled
         
         try:
@@ -295,45 +400,6 @@ class MainWindow(QMainWindow):
                 self.biometrics_toggle_check.setChecked(False)
         
         self._write_app_config(config)
-        
-    # vvvv ADD THIS NEW METHOD vvvv
-    def run_biometric_check(self) -> bool:
-        """
-        Runs the Windows Hello biometric check.
-        Returns True if successful, False otherwise.
-        """
-        if not UserConsentVerifier:
-            print("Biometric check skipped (winrt library not loaded).")
-            return False
-
-        async def check_async():
-            try:
-                # 1. Check if biometrics are even set up
-                availability = await UserConsentVerifier.check_availability_async()
-                if availability != UserConsentVerifierAvailability.AVAILABLE:
-                    print("Biometrics not available.")
-                    return False
-
-                # 2. Pop the Windows Hello dialog
-                prompt = "Sign in to CipherDrop"
-                result = await UserConsentVerifier.request_verification_async(prompt)
-                
-                # 3. Check the result
-                return result == UserConsentVerificationResult.VERIFIED
-                
-            except Exception as e:
-                print(f"Biometric check failed: {e}")
-                return False
-
-        # Run the async function from our sync code
-        try:
-            # This is the simplest way to run it.
-            return asyncio.run(check_async())
-        except RuntimeError as e:
-            # This can happen if an event loop is already running
-            print(f"Could not run biometric check: {e}")
-            return False
-    # ^^^^ END OF NEW METHOD ^^^^
     
     def try_biometric_login(self):
         """Checks for a saved token and attempts biometric unlock."""
@@ -356,7 +422,7 @@ class MainWindow(QMainWindow):
 
             if saved_token:
                 print("Found saved token. Requesting biometric unlock...")
-                if self.run_biometric_check():
+                if run_hello_via_self_helper():
                     print("Biometric unlock successful!")
                     self.session.token = saved_token
                     self.session.username = username
@@ -435,8 +501,10 @@ class MainWindow(QMainWindow):
         
         
         # NEW: Windows Hello button (manual trigger)
-        self.hello_button = QPushButton("Biometrics Sign-in")
-        self.hello_button.setEnabled(UserConsentVerifier is not None)  # disable if winrt missing
+        self.hello_button = QPushButton("Unlock with Windows Hello")
+        # Enable based on both config and availability
+        biometrics_enabled = config.get("biometrics_enabled", False)
+        self.hello_button.setEnabled(biometrics_enabled and hello_is_available())
         login_layout.addWidget(self.hello_button)
         
         # Register Tab
@@ -845,57 +913,27 @@ class MainWindow(QMainWindow):
         
     @Slot()
     def do_bio_login_clicked(self):
-        
-        """Manual Windows Hello unlock that logs in using the stored token for last_user."""
-        # Quick guards
-        if not UserConsentVerifier:
-            self.show_error("Windows Hello", "WinRT not available. Install 'winrt-runtime' and 'winrt'.")
+        if not hello_is_available():
+            self.show_error("Windows Hello", "Windows Hello isn't available.")
             return
 
-        config = self._read_app_config()
-        username = config.get("last_user")
-        biometrics_enabled = config.get("biometrics_enabled", False)
-
-        if not biometrics_enabled:
-            self.show_error("Windows Hello", "Biometric unlock is disabled in settings")
-            return
-        if not username:
-            self.show_error("Windows Hello", "Saved user not found. Log in once with credentials first.")
-            return
-
-        try:
-            saved_token = keyring.get_password("CipherDrop", username)
-        except Exception as e:
-            self.show_error("Windows Hello", f"Could not access Credential Manager: {e}")
-            return
-        if not saved_token:
-            self.show_error("Windows Hello", "No token found for the user. Log in once to store it.")
-            return
-
-        # Run the Hello prompt on a worker so the UI stays responsive
         self.statusBar().showMessage("Waiting for Windows Hello…")
-        self.hello_button.setEnabled(False)
-
-        def task():
-            # Uses your existing helper; returns True/False
-            return self.run_biometric_check()
-
-        worker = Worker(task)
-        def on_ok(ok: bool):
-            if ok:
-                # Fill session and flip UI just like a successful password login
-                self.session.token = saved_token
-                self.session.username = username
-                self.update_ui_for_login_status()
-                self.statusBar().showMessage("Unlocked with Windows Hello.")
-            else:
-                self.show_error("Windows Hello", "Verification failed or was cancelled.")
-
-        worker.signals.success.connect(on_ok)
-        worker.signals.error.connect(lambda e: self.show_error("Windows Hello", f"{e}"))
-        worker.signals.finished.connect(lambda: (self.on_worker_finished(worker), self.hello_button.setEnabled(True)))
-        self.running_workers.add(worker)
-        self.threadpool.start(worker)
+        ok = run_hello_via_self_helper()
+        if ok:
+            # reload token for last_user and update UI
+            config = self._read_app_config()
+            username = self.session.username or config.get("last_user")
+            if username:
+                token = keyring.get_password("CipherDrop", username)
+                if token:
+                    self.session.username = username
+                    self.session.token = token
+                    self.update_ui_for_login_status()
+                    self.statusBar().showMessage("Unlocked with Windows Hello.")
+                    return
+            self.show_error("Windows Hello", "No saved token for the last user.")
+        else:
+            self.show_error("Windows Hello", "Verification failed, cancelled, or unavailable.")
 
 
     @Slot()
@@ -1695,6 +1733,13 @@ class MainWindow(QMainWindow):
 # --- APPLICATION ENTRY POINT ---
 # ---------------------------------
 if __name__ == "__main__":
+    if "--hello-helper" in sys.argv:
+        sys.exit(_hello_helper_main())
+
+    if "--hello-available" in sys.argv:
+        sys.exit(_hello_available_main())
+
+    # normal GUI startup...
     app = QApplication(sys.argv)
     
     # Simple stylesheet
