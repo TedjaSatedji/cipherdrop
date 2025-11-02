@@ -4,7 +4,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
-from fastapi.responses import Response
+from fastapi.responses import Response, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy import (Column, String, Integer, LargeBinary, DateTime, Boolean,
@@ -68,6 +69,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
+
+# Mount static files
+app.mount("/assets", StaticFiles(directory="assets"), name="assets")
 
 # --- Auth helpers ---
 # after
@@ -271,3 +275,122 @@ def cleanup():
                 db.delete(rec); cnt+=1
         db.commit()
     return {"deleted": cnt}
+
+# --- Routes: welcome page ---
+@app.get("/", response_class=HTMLResponse)
+def welcome():
+    html_content = """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Welcome to CipherDrop</title>
+        <style>
+            body {
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                margin: 0;
+                padding: 0;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: #fff;
+                min-height: 100vh;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                text-align: center;
+            }
+            .container {
+                max-width: 800px;
+                padding: 40px;
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 20px;
+                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+                backdrop-filter: blur(10px);
+                border: 1px solid rgba(255, 255, 255, 0.2);
+            }
+            h1 {
+                font-size: 3rem;
+                margin-bottom: 20px;
+                text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+            }
+            p {
+                font-size: 1.2rem;
+                margin-bottom: 30px;
+                line-height: 1.6;
+            }
+            .image-container {
+                margin: 30px 0;
+            }
+            img {
+                max-width: 100%;
+                height: auto;
+                border-radius: 15px;
+                box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+            }
+            .cta-button {
+                display: inline-block;
+                padding: 15px 30px;
+                background: linear-gradient(45deg, #ff6b6b, #ffa500);
+                color: white;
+                text-decoration: none;
+                border-radius: 50px;
+                font-weight: bold;
+                font-size: 1.1rem;
+                transition: all 0.3s ease;
+                box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+            }
+            .cta-button:hover {
+                transform: translateY(-3px);
+                box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+            }
+            .features {
+                margin-top: 40px;
+                display: flex;
+                justify-content: space-around;
+                flex-wrap: wrap;
+            }
+            .feature {
+                flex: 1;
+                min-width: 200px;
+                margin: 10px;
+                padding: 20px;
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 10px;
+                backdrop-filter: blur(5px);
+            }
+            .feature h3 {
+                margin-top: 0;
+                color: #ffd700;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Welcome to CipherDrop</h1>
+            <p>ardi makan sayur atau aril tahu penghuni kos dengan asbun, mana yang lebih tidak mungkin</p>
+            
+            <div class="image-container">
+                <img src="/assets/ardi.png" alt="CipherDrop Logo" />
+            </div>
+            
+            <a href="/docs" class="cta-button">Explore API Documentation</a>
+            
+            <div class="features">
+                <div class="feature">
+                    <h3>🔐 End-to-End Encryption</h3>
+                    <p>Your files are protected with state-of-the-art encryption methods.</p>
+                </div>
+                <div class="feature">
+                    <h3>⚡ Fast & Secure</h3>
+                    <p>Quick file transfers with built-in security features.</p>
+                </div>
+                <div class="feature">
+                    <h3>🌐 Web-Based</h3>
+                    <p>Access your files from anywhere with our web interface.</p>
+                </div>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
