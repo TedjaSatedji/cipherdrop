@@ -424,6 +424,9 @@ class MainWindow(QMainWindow):
         self.threadpool = QThreadPool()
         self.running_workers = set()
         
+        self.passphrase_cache = {}
+        self.vkey_cache = {}
+        
         self.inbox_refresh_timer = QTimer(self)
         self.inbox_refresh_timer.setInterval(5000)
         self.inbox_refresh_timer.timeout.connect(self.do_refresh_inbox)
@@ -1149,6 +1152,16 @@ class MainWindow(QMainWindow):
         worker.signals.finished.connect(lambda: self.reg_button.setEnabled(True))
         self.running_workers.add(worker) # Hold reference
         self.threadpool.start(worker)
+        
+    @Slot(str, str)
+    def on_inbox_passphrase_changed(self, item_id: str, text: str):
+        """Saves the text from an inbox passphrase field to cache."""
+        self.passphrase_cache[item_id] = text
+
+    @Slot(str, str)
+    def on_inbox_vkey_changed(self, item_id: str, text: str):
+        """Saves the text from an inbox vigenere key field to cache."""
+        self.vkey_cache[item_id] = text
 
     @Slot()
     def do_send_text(self):
@@ -1205,26 +1218,26 @@ class MainWindow(QMainWindow):
     @Slot()
     def do_refresh_inbox(self):
         """Starts the inbox refresh worker."""
-        
+
         # --- THIS IS THE ANTI-STACKING CHECK ---
         # If the button is *already* disabled, it means a refresh
         # is in progress. Don't start another one.
         if not self.refresh_inbox_button.isEnabled():
             return
         # --- END OF CHECK ---
-        
+
         self.statusBar().showMessage("Refreshing inbox...")
         self.refresh_inbox_button.setEnabled(False)
-        
+
         worker = Worker(api_inbox, self.session)
         worker.signals.success.connect(self.on_inbox_success)
         worker.signals.error.connect(self.on_inbox_error)
         worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
-        
+
         # This is the line you wanted to retain, which is perfect.
         # It re-enables the button when the worker is done.
         worker.signals.finished.connect(lambda: self.refresh_inbox_button.setEnabled(True))
-        
+
         self.running_workers.add(worker) # Hold reference
         self.threadpool.start(worker)
 
@@ -1697,13 +1710,36 @@ class MainWindow(QMainWindow):
         actions_layout.setContentsMargins(0,0,0,0)
         
         # --- Decrypt Form ---
+        # --- START REPLACEMENT ---
+        item_id = item['id'] # Make sure this line is present
+        
         decrypt_form = QWidget()
         form_layout = QFormLayout(decrypt_form)
         form_layout.setContentsMargins(0,0,0,0)
+        
         passphrase_edit = QLineEdit(echoMode=QLineEdit.Password)
-        vkey_edit = QLineEdit("CRYPTO")
+        vkey_edit = QLineEdit()
+
+        # Restore text from cache if it exists
+        if item_id in self.passphrase_cache:
+            passphrase_edit.setText(self.passphrase_cache[item_id])
+        
+        if item_id in self.vkey_cache:
+            vkey_edit.setText(self.vkey_cache[item_id])
+        else:
+            vkey_edit.setText("CRYPTO") # Use default only if no cache
+
+        # Connect signals to update cache as user types
+        passphrase_edit.textChanged.connect(
+            lambda text, item_id=item_id: self.on_inbox_passphrase_changed(item_id, text)
+        )
+        vkey_edit.textChanged.connect(
+            lambda text, item_id=item_id: self.on_inbox_vkey_changed(item_id, text)
+        )
+
         form_layout.addRow("Passphrase:", passphrase_edit)
         form_layout.addRow("Vigenère Key:", vkey_edit)
+        # --- END REPLACEMENT ---
         
         # --- Action Buttons ---
         buttons_widget = QWidget()
