@@ -268,7 +268,6 @@ class MainWindow(QMainWindow):
         # --- Init UI ---
         self.init_ui()
         self.update_ui_for_login_status()
-        self.try_biometric_login()
 
     def on_biometrics_toggle(self, state: int):
         """Handle the biometrics checkbox state change."""
@@ -434,6 +433,12 @@ class MainWindow(QMainWindow):
         login_layout.addRow("Password:", self.login_pass_edit)
         login_layout.addWidget(self.login_button)
         
+        
+        # NEW: Windows Hello button (manual trigger)
+        self.hello_button = QPushButton("Biometrics Sign-in")
+        self.hello_button.setEnabled(UserConsentVerifier is not None)  # disable if winrt missing
+        login_layout.addWidget(self.hello_button)
+        
         # Register Tab
         reg_layout = QFormLayout(reg_tab)
         self.reg_user_edit = QLineEdit()
@@ -457,7 +462,7 @@ class MainWindow(QMainWindow):
         self.logged_in_label.setWordWrap(True)
         
         # Add biometrics toggle checkbox
-        self.biometrics_toggle_check = QCheckBox("Enable Biometric Unlock")
+        self.biometrics_toggle_check = QCheckBox("Enable Biometric Login")
         self.biometrics_toggle_check.setChecked(False)  # We'll load the real value later
         self.biometrics_toggle_check.stateChanged.connect(self.on_biometrics_toggle)
 
@@ -477,6 +482,9 @@ class MainWindow(QMainWindow):
         self.logout_button.clicked.connect(self.do_logout)
         self.login_button.clicked.connect(self.do_login)
         self.reg_button.clicked.connect(self.do_register)
+        
+        # NEW:
+        self.hello_button.clicked.connect(self.do_bio_login_clicked)
 
         return sidebar_frame
 
@@ -834,6 +842,61 @@ class MainWindow(QMainWindow):
         self.session.username = None
         self.update_ui_for_login_status()
         self.statusBar().showMessage("Logged out.")
+        
+    @Slot()
+    def do_bio_login_clicked(self):
+        
+        """Manual Windows Hello unlock that logs in using the stored token for last_user."""
+        # Quick guards
+        if not UserConsentVerifier:
+            self.show_error("Windows Hello", "WinRT not available. Install 'winrt-runtime' and 'winrt'.")
+            return
+
+        config = self._read_app_config()
+        username = config.get("last_user")
+        biometrics_enabled = config.get("biometrics_enabled", False)
+
+        if not biometrics_enabled:
+            self.show_error("Windows Hello", "Biometric unlock is disabled in settings")
+            return
+        if not username:
+            self.show_error("Windows Hello", "Saved user not found. Log in once with credentials first.")
+            return
+
+        try:
+            saved_token = keyring.get_password("CipherDrop", username)
+        except Exception as e:
+            self.show_error("Windows Hello", f"Could not access Credential Manager: {e}")
+            return
+        if not saved_token:
+            self.show_error("Windows Hello", "No token found for the user. Log in once to store it.")
+            return
+
+        # Run the Hello prompt on a worker so the UI stays responsive
+        self.statusBar().showMessage("Waiting for Windows Hello…")
+        self.hello_button.setEnabled(False)
+
+        def task():
+            # Uses your existing helper; returns True/False
+            return self.run_biometric_check()
+
+        worker = Worker(task)
+        def on_ok(ok: bool):
+            if ok:
+                # Fill session and flip UI just like a successful password login
+                self.session.token = saved_token
+                self.session.username = username
+                self.update_ui_for_login_status()
+                self.statusBar().showMessage("Unlocked with Windows Hello.")
+            else:
+                self.show_error("Windows Hello", "Verification failed or was cancelled.")
+
+        worker.signals.success.connect(on_ok)
+        worker.signals.error.connect(lambda e: self.show_error("Windows Hello", f"{e}"))
+        worker.signals.finished.connect(lambda: (self.on_worker_finished(worker), self.hello_button.setEnabled(True)))
+        self.running_workers.add(worker)
+        self.threadpool.start(worker)
+
 
     @Slot()
     def do_login(self):

@@ -3,15 +3,13 @@
 /client
 /dist
 /dropbox.db
-exe.spec
 crypto/__pycache__/vigenere.cpython-310.pyc
 exe.py
-CipherDrop.spec
 /__pycache__
 icon/Cyber-Cage.ico
-cipherapp.spec
 keyringtest.py
 cipherdrop.zip
 .env
 last_user.cfg
 app_config.json
+*.spec
