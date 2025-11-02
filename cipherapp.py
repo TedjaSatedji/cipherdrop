@@ -1448,58 +1448,48 @@ class MainWindow(QMainWindow):
 
     @Slot(object, str)
     def on_login_success(self, token, username):
-        # self.login_button.setEnabled(True) # Handled by 'finished' signal
-        if not token:
-            self.statusBar().showMessage("Invalid credentials.")
-            self.show_error("Login Failed", "Invalid username or password.")
-        else:
-            self.session.token = token
-            self.session.username = username
-            
-            # Handle biometric settings
-            config = self._read_app_config()  # Get existing config
-            config["last_user"] = username
-            
-            if self.biometrics_toggle_check.isChecked():
-                # User wants biometrics
-                try:
-                    keyring.set_password("CipherDrop", username, token)
-                    config["biometrics_enabled"] = True
-                    print(f"Token saved to keyring for {username}")
-                except Exception as e:
-                    print(f"WARNING: Could not save token to keyring: {e}")
-                    config["biometrics_enabled"] = False  # Failed, so don't set it
-            else:
-                # User does not want biometrics
-                config["biometrics_enabled"] = False
-                try:
-                    # Explicitly delete any old token
-                    keyring.delete_password("CipherDrop", username)
-                    print(f"Biometrics disabled. Removed token for {username}.")
-                except keyring.errors.NoKeyringError:
-                    print("No keyring service found to delete from.")
-                except keyring.errors.PasswordDeleteError:
-                    print(f"No token found for {username} to delete, or delete failed.")
-                except Exception as e:
-                    print(f"Error deleting token from keyring: {e}")
+        self.session.token = token
+        self.session.username = username
 
-            self._write_app_config(config)
-            self.update_ui_for_login_status()
-            self.statusBar().showMessage("Logged in successfully.")
-            
+        # Handle biometric settings
+        config = self._read_app_config()  # Get existing config
+        config["last_user"] = username
+        
+        # --- START OF FIX ---
+        # Read the SAVED preference, not the UI checkbox state
+        is_bio_enabled = config.get("biometrics_enabled", False)
+
+        if is_bio_enabled:
+            # Biometrics are enabled, so save the new token we just got
             try:
-                # Save the token to Windows Credential Manager
                 keyring.set_password("CipherDrop", username, token)
-                # We also need to remember *who* logged in.
-                # Write to app data directory
-                (CONFIG_DIR / "last_user.cfg").write_text(username)
-                print(f"Token saved to keyring for {username}")
+                print(f"Token (re)saved to keyring for {username}")
             except Exception as e:
                 print(f"WARNING: Could not save token to keyring: {e}")
-            # ^^^^ END OF NEW BLOCK ^^^^
+                # Don't disable biometrics on failure, just warn.
+        else:
+            # Biometrics are not enabled, so make sure no old token is present
+            try:
+                keyring.delete_password("CipherDrop", username)
+                print(f"Biometrics disabled. Ensured token for {username} is removed.")
+            except (keyring.errors.NoKeyringError, keyring.errors.PasswordDeleteError):
+                pass  # It's fine if it's already gone
+            except Exception as e:
+                print(f"Error clearing old token from keyring: {e}")
 
-            self.update_ui_for_login_status()
-            self.statusBar().showMessage("Logged in successfully.")
+        # We ONLY write the last_user here. We DO NOT change the
+        # biometrics_enabled flag, as only the user toggle should do that.
+        self._write_app_config(config)
+        
+        # --- END OF FIX ---
+        
+        # This function will now read the (correct, unmodified) config
+        # and set the checkbox state properly.
+        self.update_ui_for_login_status()
+        self.statusBar().showMessage("Logged in successfully.")
+        
+        # (I also removed a duplicated block of code that was
+        # here, as it was redundant with the logic above)
 
     @Slot(Exception)
     def on_login_error(self, e):
