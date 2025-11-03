@@ -13,3 +13,4 @@ cipherdrop.zip
 last_user.cfg
 app_config.json
 *.spec
+/venv
