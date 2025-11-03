@@ -219,8 +219,16 @@ def api_register(sess: Session, username: str, password: str):
 
 def api_login(sess: Session, username: str, password: str):
     r = requests.post(f"{sess.api}/auth/login", json={"username": username, "password": password})
+    # If login failed, raise an exception with the server-provided message
     if r.status_code != 200:
-        return None
+        # Try to extract a helpful error message from JSON body, fallback to text
+        try:
+            body = r.json()
+            msg = body.get("detail") or body.get("message") or json.dumps(body)
+        except Exception:
+            msg = r.text or r.reason
+        raise RuntimeError(f"Wrong username or password!")
+
     tok = r.json().get("token")
     return tok
 
@@ -1023,16 +1031,16 @@ class MainWindow(QMainWindow):
             config["last_user"] = self.session.username
             self._write_app_config(config)
             
-            # Delete the stored token if it exists
-            try:
-                keyring.delete_password("CipherDrop", self.session.username)
-                print(f"Logged out. Removed token for {self.session.username}.")
-            except keyring.errors.NoKeyringError:
-                print("No keyring service found to delete from.")
-            except keyring.errors.PasswordDeleteError:
-                print(f"No token found for {self.session.username} to delete, or delete failed.")
-            except Exception as e:
-                print(f"Error deleting token from keyring on logout: {e}")
+            ## Delete the stored token if it exists
+            #try:
+            #    keyring.delete_password("CipherDrop", self.session.username)
+            #    print(f"Logged out. Removed token for {self.session.username}.")
+            #except keyring.errors.NoKeyringError:
+            #    print("No keyring service found to delete from.")
+            #except keyring.errors.PasswordDeleteError:
+            #    print(f"No token found for {self.session.username} to delete, or delete failed.")
+            #except Exception as e:
+            #    print(f"Error deleting token from keyring on logout: {e}")
 
         self.inbox_refresh_timer.stop()
         self.session.token = None
