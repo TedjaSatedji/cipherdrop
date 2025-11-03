@@ -1053,24 +1053,25 @@ class MainWindow(QMainWindow):
         if not hello_is_available():
             self.show_error("Windows Hello", "Windows Hello isn't available.")
             return
-
+        # Use a background worker so the blocking subprocess.run() call
+        # doesn't freeze the main UI thread while Windows Hello prompt is shown.
         self.statusBar().showMessage("Waiting for Windows Hello…")
-        ok = run_hello_via_self_helper()
-        if ok:
-            # reload token for last_user and update UI
-            config = self._read_app_config()
-            username = self.session.username or config.get("last_user")
-            if username:
-                token = keyring.get_password("CipherDrop", username)
-                if token:
-                    self.session.username = username
-                    self.session.token = token
-                    self.update_ui_for_login_status()
-                    self.statusBar().showMessage("Unlocked with Windows Hello.")
-                    return
-            self.show_error("Windows Hello", "No saved token for the last user.")
-        else:
-            self.show_error("Windows Hello", "Verification failed, cancelled, or unavailable.")
+        # Disable the button while the prompt is active
+        try:
+            self.hello_button.setEnabled(False)
+        except Exception:
+            pass
+
+        worker = Worker(run_hello_via_self_helper)
+        # success will emit the boolean result from the helper
+        worker.signals.success.connect(self.on_bio_login_success)
+        worker.signals.error.connect(self.on_bio_login_error)
+        # Ensure we remove the worker reference and re-enable UI when finished
+        worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        worker.signals.finished.connect(lambda: self.hello_button.setEnabled(True))
+
+        self.running_workers.add(worker)
+        self.threadpool.start(worker)
 
 
     @Slot()
@@ -1532,6 +1533,36 @@ class MainWindow(QMainWindow):
     def on_login_error(self, e):
         # self.login_button.setEnabled(True) # Handled by 'finished' signal
         self.show_error("Login Error", f"Could not log in: {e}")
+
+    @Slot(object)
+    def on_bio_login_success(self, ok: bool):
+        """Handle successful return from the Windows Hello helper worker.
+        `ok` is True when verification succeeded.
+        """
+        try:
+            if ok:
+                # reload token for last_user and update UI
+                config = self._read_app_config()
+                username = self.session.username or config.get("last_user")
+                if username:
+                    token = keyring.get_password("CipherDrop", username)
+                    if token:
+                        self.session.username = username
+                        self.session.token = token
+                        self.update_ui_for_login_status()
+                        self.statusBar().showMessage("Unlocked with Windows Hello.")
+                        return
+                self.show_error("Windows Hello", "No saved token for the last user.")
+            else:
+                self.show_error("Windows Hello", "Verification failed, cancelled, or unavailable.")
+        except Exception as e:
+            # Any unexpected error handling the result
+            self.show_error("Windows Hello Error", f"An error occurred handling biometric result: {e}")
+
+    @Slot(Exception)
+    def on_bio_login_error(self, e: Exception):
+        """Handle unexpected exceptions raised while running the helper."""
+        self.show_error("Windows Hello Error", f"An unexpected error occurred: {e}")
 
     @Slot(object)
     def on_register_success(self, result):
