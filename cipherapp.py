@@ -1605,7 +1605,9 @@ class MainWindow(QMainWindow):
             self.refresh_inbox_button.setEnabled(False)
 
         worker = Worker(api_inbox, self.session)
-        worker.signals.success.connect(self.on_inbox_success)
+        worker.signals.success.connect(
+            lambda inbox_list: self.on_inbox_success(inbox_list, is_auto_refresh=is_auto_refresh)
+        )
         worker.signals.error.connect(self.on_inbox_error)
         worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
 
@@ -1860,7 +1862,9 @@ class MainWindow(QMainWindow):
             self.refresh_groups_button.setEnabled(False)
 
         worker = Worker(api_list_groups, self.session)
-        worker.signals.success.connect(self.on_refresh_groups_success)
+        worker.signals.success.connect(
+            lambda groups_data: self.on_refresh_groups_success(groups_data, is_auto_refresh=is_auto_refresh)
+        )
         worker.signals.error.connect(self.on_refresh_groups_error)
         worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
 
@@ -2094,7 +2098,9 @@ class MainWindow(QMainWindow):
             self.refresh_messages_button.setEnabled(False)
 
         worker = Worker(api_get_group_messages, self.session, group_id)
-        worker.signals.success.connect(lambda msgs: self.on_refresh_messages_success(group_id, msgs))
+        worker.signals.success.connect(
+            lambda msgs: self.on_refresh_messages_success(group_id, msgs, is_auto_refresh=is_auto_refresh)
+        )
         worker.signals.error.connect(self.on_refresh_messages_error)
         worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
 
@@ -2255,9 +2261,10 @@ class MainWindow(QMainWindow):
         self.show_error("Send Error", f"Could not send message: {e}")
 
     @Slot(object)
-    def on_inbox_success(self, inbox_list):
+    def on_inbox_success(self, inbox_list, is_auto_refresh: bool = False):
         # self.refresh_inbox_button.setEnabled(True) # Handled by 'finished' signal
-        self.statusBar().showMessage(f"Inbox refreshed. {len(inbox_list)} items.")
+        if not is_auto_refresh: # <-- Add check
+            self.statusBar().showMessage(f"Inbox refreshed. {len(inbox_list)} items.")
         
         # Auto-add senders from inbox to contacts
         contacts_updated = False
@@ -2358,10 +2365,11 @@ class MainWindow(QMainWindow):
     # --- GROUP CALLBACKS ---
     
     @Slot(object)
-    def on_refresh_groups_success(self, groups_data):
+    def on_refresh_groups_success(self, groups_data, is_auto_refresh: bool = False):
         """Updates the groups list UI."""
         self.groups_list = groups_data
-        self.statusBar().showMessage(f"Loaded {len(groups_data)} groups.")
+        if not is_auto_refresh: # <-- Add check
+            self.statusBar().showMessage(f"Loaded {len(groups_data)} groups.")
         
         # Update the list widget
         self.groups_list_widget.clear()
@@ -2383,10 +2391,11 @@ class MainWindow(QMainWindow):
         self.show_error("Refresh Groups Error", f"Could not load groups: {e}")
 
     @Slot(object)
-    def on_refresh_groups_success(self, groups_data):
+    def on_refresh_groups_success(self, groups_data, is_auto_refresh: bool = False):
         """Updates the groups list UI."""
         self.groups_list = groups_data
-        self.statusBar().showMessage(f"Loaded {len(groups_data)} groups.")
+        if not is_auto_refresh: # <-- Add check
+            self.statusBar().showMessage(f"Loaded {len(groups_data)} groups.")
         
         # Update the list widget
         self.groups_list_widget.clear()
@@ -2540,7 +2549,7 @@ class MainWindow(QMainWindow):
         self.show_error("Unlock Error", f"Could not unlock chat: {e}\n\nMake sure you're using the correct passphrase.")
 
     @Slot(str, list)
-    def on_refresh_messages_success(self, group_id, messages):
+    def on_refresh_messages_success(self, group_id, messages , is_auto_refresh: bool = False):
         """Displays decrypted group messages."""
         if group_id not in self.group_keys_cache:
             return
@@ -2564,7 +2573,8 @@ class MainWindow(QMainWindow):
         
         # Scroll to bottom
         self.group_messages_text.moveCursor(QTextCursor.End)
-        self.statusBar().showMessage(f"Loaded {len(messages)} messages.")
+        if not is_auto_refresh: # <-- Add check
+            self.statusBar().showMessage(f"Loaded {len(messages)} messages.")
 
     @Slot(Exception)
     def on_refresh_messages_error(self, e):
