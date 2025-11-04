@@ -52,7 +52,7 @@ from PySide6.QtWidgets import (
     QGroupBox, QFrame, QGridLayout, QFormLayout, QDialog, QComboBox,
     QListWidget, QListWidgetItem
 )
-from PySide6.QtGui import QIcon, QPixmap, QFont
+from PySide6.QtGui import QIcon, QPixmap, QFont, QTextCursor
 
 # --- Add app data paths ---
 CONFIG_DIR = pathlib.Path(QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)) / "CipherDrop"
@@ -592,6 +592,17 @@ class MainWindow(QMainWindow):
         self.inbox_refresh_timer.setInterval(5000)
         self.inbox_refresh_timer.timeout.connect(self.do_refresh_inbox)
         
+        # --- NEW: Timer for refreshing the groups list ---
+        self.groups_refresh_timer = QTimer(self)
+        self.groups_refresh_timer.setInterval(15000) # 15 seconds
+        self.groups_refresh_timer.timeout.connect(self.do_refresh_groups)
+        
+        # --- NEW: Timer for refreshing the active group chat ---
+        self.chat_refresh_timer = QTimer(self)
+        self.chat_refresh_timer.setInterval(5000) # 5 seconds
+        self.chat_refresh_timer.timeout.connect(self.do_refresh_group_messages)
+        # --- END NEW ---
+        
         # --- Store file paths for uploads ---
         self.send_file_path = None
         self.stego_cover_png_path = None
@@ -690,9 +701,14 @@ class MainWindow(QMainWindow):
         self.main_layout.addWidget(self.sidebar_frame)
         self.sidebar_frame.setMinimumWidth(250)
         self.sidebar_frame.setMaximumWidth(300)
+        
+        
 
         # --- Create Main Tabs ---
         self.main_tabs = self.create_main_tabs()
+        # --- NEW: Connect tab switching to manage timers ---
+        self.main_tabs.currentChanged.connect(self.on_main_tab_changed)
+        # --- END NEW ---
         self.main_layout.addWidget(self.main_tabs, 1) # Add with stretch factor
 
     def create_sidebar(self) -> QFrame:
@@ -1332,6 +1348,36 @@ class MainWindow(QMainWindow):
             self.running_workers.remove(worker)
         except KeyError:
             pass # Should not happen, but safe to ignore
+        
+    @Slot(int)
+    def on_main_tab_changed(self, index: int):
+        """
+        Manages timers based on which main tab is visible.
+        (0: Inbox, 1: Compose, 2: Groups, 3: Local Decrypt, 4: Contacts)
+        """
+        # Stop all tab-dependent timers first
+        self.groups_refresh_timer.stop()
+        self.chat_refresh_timer.stop()
+
+        if not self.session.token:
+            return # Not logged in, do nothing
+
+        if index == 0: # Inbox
+            # The inbox timer is global, but we can trigger
+            # an immediate refresh when user clicks the tab.
+            self.do_refresh_inbox()
+            
+        elif index == 2: # Groups
+            # User just clicked "Groups" tab
+            # Start the groups list timer
+            self.groups_refresh_timer.start()
+            # Do an immediate refresh of the list
+            self.do_refresh_groups()
+            
+            # Start the chat timer. It will be guarded by
+            # do_refresh_group_messages and will only run
+            # if a chat is actually unlocked.
+            self.chat_refresh_timer.start()
 
     # ---------------------------------
     # --- "DO" METHODS (GUI -> Worker) ---
@@ -1359,6 +1405,10 @@ class MainWindow(QMainWindow):
             #    print(f"Error deleting token from keyring on logout: {e}")
 
         self.inbox_refresh_timer.stop()
+        # --- NEW ---
+        self.groups_refresh_timer.stop()
+        self.chat_refresh_timer.stop()
+        # --- END NEW ---
         self.session.token = None
         self.session.username = None
         self.update_ui_for_login_status()
@@ -1966,6 +2016,11 @@ class MainWindow(QMainWindow):
     @Slot()
     def on_chat_group_changed(self):
         """Called when the chat group selector changes."""
+        
+        # --- NEW: Stop auto-refresh when switching groups ---
+        self.chat_refresh_timer.stop()
+        # --- END NEW ---
+        
         # Reset chat state when switching groups
         self.group_message_edit.setEnabled(False)
         self.send_group_message_button.setEnabled(False)
@@ -2013,6 +2068,12 @@ class MainWindow(QMainWindow):
     @Slot()
     def do_refresh_group_messages(self):
         """Refreshes messages for the currently unlocked group."""
+        
+        # --- NEW: Anti-stacking check ---
+        if not self.refresh_messages_button.isEnabled():
+            return # A refresh is already in progress
+        # --- END NEW ---
+
         group_index = self.chat_group_combo.currentIndex()
         if group_index < 0:
             return
@@ -2020,18 +2081,27 @@ class MainWindow(QMainWindow):
         group_id = self.chat_group_combo.itemData(group_index)
         
         if group_id not in self.group_keys_cache:
-            self.show_error("Refresh Messages", "Please unlock the chat first.")
+            # No chat unlocked, just fail silently for the auto-refresher
             return
         
         self.statusBar().showMessage("Loading messages...")
+        
+        # --- NEW: Disable button during refresh ---
+        self.refresh_messages_button.setEnabled(False)
+        # --- END NEW ---
         
         worker = Worker(api_get_group_messages, self.session, group_id)
         worker.signals.success.connect(lambda msgs: self.on_refresh_messages_success(group_id, msgs))
         worker.signals.error.connect(self.on_refresh_messages_error)
         worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        
+        # --- NEW: Re-enable button when finished ---
+        worker.signals.finished.connect(lambda: self.refresh_messages_button.setEnabled(True))
+        # --- END NEW ---
+        
         self.running_workers.add(worker)
         self.threadpool.start(worker)
-
+        
     @Slot()
     def do_send_group_message(self):
         """Sends a message to the group."""
@@ -2311,21 +2381,52 @@ class MainWindow(QMainWindow):
         self.show_error("Refresh Groups Error", f"Could not load groups: {e}")
 
     @Slot(object)
-    def on_create_group_success(self, result):
-        """Called when group is successfully created."""
-        group_data, group_key = result
-        group_id = group_data['id']
+    def on_refresh_groups_success(self, groups_data):
+        """Updates the groups list UI."""
+        self.groups_list = groups_data
+        self.statusBar().showMessage(f"Loaded {len(groups_data)} groups.")
         
-        # Cache the group key
-        self.group_keys_cache[group_id] = group_key
-        self.current_group_id = group_id
+        # Update the list widget
+        self.groups_list_widget.clear()
+        for group in groups_data:
+            item_text = f"{group['name']} (by {group['creator']})"
+            if group['is_admin']:
+                item_text += " [Admin]"
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.ItemDataRole.UserRole, group['id'])
+            self.groups_list_widget.addItem(item)
         
-        self.show_success("Group Created", f"Group '{group_data['name']}' created successfully.\nYou can now add members.")
-        self.group_name_edit.clear()
-        self.group_passphrase_edit.clear()
+        # --- START OF FIX ---
+        # Smartly update chat combo to prevent UI reset
         
-        # Refresh groups list
-        self.do_refresh_groups()
+        # 1. Get the currently selected group ID (if any)
+        current_group_id = None
+        if self.chat_group_combo.currentIndex() >= 0:
+            current_group_id = self.chat_group_combo.itemData(self.chat_group_combo.currentIndex())
+
+        # 2. Block signals to prevent on_chat_group_changed from firing
+        self.chat_group_combo.blockSignals(True)
+        
+        self.chat_group_combo.clear()
+        
+        new_index_to_select = -1
+        
+        # 3. Rebuild the list
+        for i, group in enumerate(groups_data):
+            self.chat_group_combo.addItem(group['name'], group['id'])
+            # 4. Find the new index of our old selection
+            if group['id'] == current_group_id:
+                new_index_to_select = i
+                
+        # 5. Restore the selection
+        if new_index_to_select != -1:
+            self.chat_group_combo.setCurrentIndex(new_index_to_select)
+        elif len(groups_data) > 0:
+            self.chat_group_combo.setCurrentIndex(0) # Default to first item
+            
+        # 6. Unblock signals
+        self.chat_group_combo.blockSignals(False)
+        # --- END OF FIX ---
 
     @Slot(Exception)
     def on_create_group_error(self, e):
@@ -2391,6 +2492,11 @@ class MainWindow(QMainWindow):
         
         self.statusBar().showMessage("Chat unlocked. Loading messages...")
         
+        # --- NEW: Ensure the chat refresh timer is running ---
+        if self.main_tabs.currentIndex() == 2: # 2 is Groups tab
+             self.chat_refresh_timer.start()
+        # --- END NEW ---
+        
         # Auto-load messages
         self.do_refresh_group_messages()
 
@@ -2422,7 +2528,7 @@ class MainWindow(QMainWindow):
                 self.group_messages_text.append(f"[{msg['created_at'][:19]}] {msg['sender']}: [Decryption failed]")
         
         # Scroll to bottom
-        self.group_messages_text.moveCursor(self.group_messages_text.textCursor().End)
+        self.group_messages_text.moveCursor(QTextCursor.End)
         self.statusBar().showMessage(f"Loaded {len(messages)} messages.")
 
     @Slot(Exception)
