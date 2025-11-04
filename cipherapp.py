@@ -757,7 +757,7 @@ class MainWindow(QMainWindow):
         
         
         # NEW: Windows Hello button (manual trigger)
-        self.hello_button = QPushButton("Unlock with Windows Hello")
+        self.hello_button = QPushButton("Windows Hello Sign-in")
         # Enable based on both config and availability
         biometrics_enabled = config.get("biometrics_enabled", False)
         self.hello_button.setEnabled(biometrics_enabled and hello_is_available())
