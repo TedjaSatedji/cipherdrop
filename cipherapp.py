@@ -23,11 +23,13 @@ import sys
 import subprocess
 import tempfile
 import pathlib
+import secrets
 from dataclasses import dataclass
 from typing import Optional, Callable
 import traceback
 import asyncio
 import keyring
+import ctypes
 import ctypes
 
 # for pyinstall
@@ -278,6 +280,76 @@ def api_delete_item(sess: Session, item_id: str):
 # --- END ADD ---
 
 
+# --- GROUP API FUNCTIONS ---
+def api_create_group(sess: Session, name: str, encrypted_group_key_b64: str):
+    """Create a new group."""
+    r = requests.post(
+        f"{sess.api}/api/groups/create",
+        headers=sess.headers,
+        json={"name": name, "encrypted_group_key_b64": encrypted_group_key_b64}
+    )
+    r.raise_for_status()
+    return r.json()
+
+def api_list_groups(sess: Session):
+    """List all groups the user is a member of."""
+    r = requests.get(f"{sess.api}/api/groups", headers=sess.headers)
+    r.raise_for_status()
+    return r.json()
+
+def api_get_group_members(sess: Session, group_id: str):
+    """Get all members of a group."""
+    r = requests.get(f"{sess.api}/api/groups/{group_id}/members", headers=sess.headers)
+    r.raise_for_status()
+    return r.json()
+
+def api_add_group_member(sess: Session, group_id: str, username: str, encrypted_group_key_b64: str):
+    """Add a member to a group."""
+    r = requests.post(
+        f"{sess.api}/api/groups/{group_id}/members",
+        headers=sess.headers,
+        json={"username": username, "encrypted_group_key_b64": encrypted_group_key_b64}
+    )
+    r.raise_for_status()
+    return r.json()
+
+def api_remove_group_member(sess: Session, group_id: str, username: str):
+    """Remove a member from a group."""
+    r = requests.delete(
+        f"{sess.api}/api/groups/{group_id}/members/{username}",
+        headers=sess.headers
+    )
+    r.raise_for_status()
+    return r.json()
+
+def api_send_group_message(sess: Session, group_id: str, encrypted_blob_b64: str):
+    """Send a message to a group."""
+    r = requests.post(
+        f"{sess.api}/api/groups/{group_id}/messages",
+        headers=sess.headers,
+        json={"encrypted_blob_b64": encrypted_blob_b64}
+    )
+    r.raise_for_status()
+    return r.json()
+
+def api_get_group_messages(sess: Session, group_id: str, limit: int = 50):
+    """Get messages from a group."""
+    r = requests.get(
+        f"{sess.api}/api/groups/{group_id}/messages",
+        headers=sess.headers,
+        params={"limit": limit}
+    )
+    r.raise_for_status()
+    return r.json()
+
+def api_delete_group(sess: Session, group_id: str):
+    """Delete a group."""
+    r = requests.delete(f"{sess.api}/api/groups/{group_id}", headers=sess.headers)
+    r.raise_for_status()
+    return r.json()
+# --- END GROUP API FUNCTIONS ---
+
+
 # --- UI Helpers ---
 
 def reveal_env_from_png_bytes(png_bytes: bytes) -> dict:
@@ -291,6 +363,82 @@ def reveal_env_from_png_bytes(png_bytes: bytes) -> dict:
     if not isinstance(env, dict) or "ct_b64" not in env:
         raise ValueError("No hidden envelope found in PNG.")
     return env
+
+# --- GROUP KEY MANAGEMENT HELPERS ---
+def generate_group_key() -> bytes:
+    """Generate a random 32-byte group key for AES-256."""
+    return secrets.token_bytes(32)
+
+def encrypt_group_key_for_user(group_key: bytes, user_passphrase: str) -> str:
+    """
+    Encrypt a group key with a user's passphrase.
+    Returns base64-encoded encrypted envelope.
+    """
+    # Use the existing crypto to encrypt the group key
+    dk = derive_key_from_password(user_passphrase)
+    
+    # Treat the group key as "text" to encrypt
+    group_key_hex = group_key.hex()
+    env = super_encrypt_text(group_key_hex, "GROUPKEY", dk.key)
+    
+    # Add KDF info
+    env["kdf"] = {
+        "type": "argon2id",
+        "salt_b64": base64.b64encode(dk.salt).decode(),
+        "t": ARGON_PARAMS["time_cost"],
+        "m": ARGON_PARAMS["memory_cost"],
+        "p": ARGON_PARAMS["parallelism"],
+    }
+    
+    # Return as base64-encoded JSON
+    return base64.b64encode(json.dumps(env).encode()).decode()
+
+def decrypt_group_key_for_user(encrypted_group_key_b64: str, user_passphrase: str) -> bytes:
+    """
+    Decrypt a group key using a user's passphrase.
+    Returns the raw group key bytes.
+    """
+    # Decode the base64 envelope
+    env = json.loads(base64.b64decode(encrypted_group_key_b64))
+    
+    # Derive key from passphrase
+    salt = base64.b64decode(env["kdf"]["salt_b64"])
+    dk = derive_key_from_password(user_passphrase, salt)
+    
+    # Decrypt
+    group_key_hex = super_decrypt_text(env, "GROUPKEY", dk.key)
+    return bytes.fromhex(group_key_hex)
+
+def encrypt_group_message(message: str, group_key: bytes) -> str:
+    """
+    Encrypt a message with a group key.
+    Returns base64-encoded encrypted blob.
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    
+    aesgcm = AESGCM(group_key)
+    nonce = secrets.token_bytes(12)
+    ciphertext = aesgcm.encrypt(nonce, message.encode('utf-8'), None)
+    
+    # Package nonce + ciphertext
+    blob = nonce + ciphertext
+    return base64.b64encode(blob).decode()
+
+def decrypt_group_message(encrypted_blob_b64: str, group_key: bytes) -> str:
+    """
+    Decrypt a message with a group key.
+    Returns the plain text message.
+    """
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    
+    blob = base64.b64decode(encrypted_blob_b64)
+    nonce = blob[:12]
+    ciphertext = blob[12:]
+    
+    aesgcm = AESGCM(group_key)
+    plaintext = aesgcm.decrypt(nonce, ciphertext, None)
+    return plaintext.decode('utf-8')
+# --- END GROUP KEY MANAGEMENT HELPERS ---
 
 # ----------------------------------------------------------------------
 # WINDOWS HELLO UTILITY FUNCTIONS
@@ -434,6 +582,11 @@ class MainWindow(QMainWindow):
         
         self.passphrase_cache = {}
         self.vkey_cache = {}
+        
+        # --- Group State ---
+        self.groups_list = []  # List of group dicts
+        self.current_group_id = None  # Currently selected group
+        self.group_keys_cache = {}  # {group_id: decrypted_group_key_bytes}
         
         self.inbox_refresh_timer = QTimer(self)
         self.inbox_refresh_timer.setInterval(5000)
@@ -648,6 +801,7 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         tabs.addTab(self.create_inbox_tab(), "Inbox")
         tabs.addTab(self.create_compose_tab(), "Compose")
+        tabs.addTab(self.create_groups_tab(), "Groups")
         tabs.addTab(self.create_stego_decrypt_tab(), "Local Decrypt")
         tabs.addTab(self.create_contacts_tab(), "Contacts")
         
@@ -867,6 +1021,168 @@ class MainWindow(QMainWindow):
         self.stego_local_reveal_button.clicked.connect(self.do_reveal_stego_local)
         layout.addWidget(self.stego_local_reveal_button)
         layout.addStretch()
+        
+        return widget
+
+    def create_groups_tab(self) -> QWidget:
+        """Creates the Groups tab with sub-tabs for management and chat."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Create sub-tabs for groups
+        groups_tabs = QTabWidget()
+        groups_tabs.addTab(self.create_group_list_tab(), "My Groups")
+        groups_tabs.addTab(self.create_group_create_tab(), "Create Group")
+        groups_tabs.addTab(self.create_group_chat_tab(), "Group Chat")
+        
+        layout.addWidget(groups_tabs)
+        return widget
+
+    def create_group_list_tab(self) -> QWidget:
+        """Creates the group list and management tab."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        header_layout = QHBoxLayout()
+        header = QLabel("My Groups")
+        header.setFont(QFont("Inter", 16, QFont.Weight.Bold))
+        header_layout.addWidget(header)
+        header_layout.addStretch()
+        
+        self.refresh_groups_button = QPushButton("Refresh Groups")
+        self.refresh_groups_button.clicked.connect(self.do_refresh_groups)
+        header_layout.addWidget(self.refresh_groups_button)
+        
+        layout.addLayout(header_layout)
+        
+        # --- Groups List ---
+        self.groups_list_widget = QListWidget()
+        self.groups_list_widget.itemClicked.connect(self.on_group_selected)
+        layout.addWidget(self.groups_list_widget, 1)
+        
+        # --- Group Actions ---
+        actions_layout = QHBoxLayout()
+        self.view_group_button = QPushButton("View Members")
+        self.view_group_button.clicked.connect(self.do_view_group_members)
+        self.delete_group_button = QPushButton("Delete Group")
+        self.delete_group_button.clicked.connect(self.do_delete_group)
+        self.leave_group_button = QPushButton("Leave Group")
+        self.leave_group_button.clicked.connect(self.do_leave_group)
+        
+        actions_layout.addWidget(self.view_group_button)
+        actions_layout.addWidget(self.delete_group_button)
+        actions_layout.addWidget(self.leave_group_button)
+        layout.addLayout(actions_layout)
+        
+        layout.addStretch()
+        return widget
+
+    def create_group_create_tab(self) -> QWidget:
+        """Creates the group creation tab."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        header = QLabel("Create New Group")
+        header.setFont(QFont("Inter", 16, QFont.Weight.Bold))
+        layout.addWidget(header)
+        
+        # --- Form ---
+        form_layout = QFormLayout()
+        self.group_name_edit = QLineEdit(placeholderText="Enter group name...")
+        self.group_passphrase_edit = QLineEdit(echoMode=QLineEdit.Password, placeholderText="Your passphrase for encryption...")
+        
+        form_layout.addRow("Group Name:", self.group_name_edit)
+        form_layout.addRow("Your Passphrase:", self.group_passphrase_edit)
+        layout.addLayout(form_layout)
+        
+        info_label = QLabel("ℹ️ A random group key will be generated and encrypted with your passphrase.\nYou'll need this passphrase to decrypt group messages.")
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: #666; font-style: italic;")
+        layout.addWidget(info_label)
+        
+        # --- Create Button ---
+        self.create_group_button = QPushButton("Create Group")
+        self.create_group_button.clicked.connect(self.do_create_group)
+        layout.addWidget(self.create_group_button)
+        
+        # --- Add Members Section ---
+        add_member_group = QGroupBox("Add Members to New Group")
+        add_member_layout = QVBoxLayout()
+        
+        add_form = QHBoxLayout()
+        self.add_member_username_edit = QLineEdit(placeholderText="Username to add...")
+        self.add_member_passphrase_edit = QLineEdit(echoMode=QLineEdit.Password, placeholderText="Their passphrase...")
+        self.add_member_button = QPushButton("Add Member")
+        self.add_member_button.clicked.connect(self.do_add_group_member)
+        
+        add_form.addWidget(QLabel("Username:"))
+        add_form.addWidget(self.add_member_username_edit)
+        add_form.addWidget(QLabel("Passphrase:"))
+        add_form.addWidget(self.add_member_passphrase_edit)
+        add_form.addWidget(self.add_member_button)
+        
+        add_member_layout.addLayout(add_form)
+        
+        info_label2 = QLabel("ℹ️ To add a member, you need their passphrase to encrypt the group key for them.\nIn practice, they would share their passphrase with you via a secure channel.")
+        info_label2.setWordWrap(True)
+        info_label2.setStyleSheet("color: #666; font-style: italic; font-size: 11px;")
+        add_member_layout.addWidget(info_label2)
+        
+        add_member_group.setLayout(add_member_layout)
+        layout.addWidget(add_member_group)
+        
+        layout.addStretch()
+        return widget
+
+    def create_group_chat_tab(self) -> QWidget:
+        """Creates the group chat interface."""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        # --- Header with Group Selector ---
+        header_layout = QHBoxLayout()
+        header_layout.addWidget(QLabel("Group:"))
+        
+        self.chat_group_combo = QComboBox()
+        self.chat_group_combo.currentIndexChanged.connect(self.on_chat_group_changed)
+        header_layout.addWidget(self.chat_group_combo, 1)
+        
+        self.chat_passphrase_edit = QLineEdit(echoMode=QLineEdit.Password, placeholderText="Your passphrase...")
+        header_layout.addWidget(QLabel("Passphrase:"))
+        header_layout.addWidget(self.chat_passphrase_edit)
+        
+        self.unlock_chat_button = QPushButton("Unlock Chat")
+        self.unlock_chat_button.clicked.connect(self.do_unlock_group_chat)
+        header_layout.addWidget(self.unlock_chat_button)
+        
+        self.refresh_messages_button = QPushButton("Refresh")
+        self.refresh_messages_button.clicked.connect(self.do_refresh_group_messages)
+        header_layout.addWidget(self.refresh_messages_button)
+        
+        layout.addLayout(header_layout)
+        
+        # --- Messages Area ---
+        self.group_messages_text = QTextEdit()
+        self.group_messages_text.setReadOnly(True)
+        self.group_messages_text.setMinimumHeight(300)
+        layout.addWidget(self.group_messages_text, 1)
+        
+        # --- Send Message ---
+        send_layout = QHBoxLayout()
+        self.group_message_edit = QLineEdit(placeholderText="Type your message...")
+        self.group_message_edit.returnPressed.connect(self.do_send_group_message)
+        self.send_group_message_button = QPushButton("Send")
+        self.send_group_message_button.clicked.connect(self.do_send_group_message)
+        
+        send_layout.addWidget(self.group_message_edit, 1)
+        send_layout.addWidget(self.send_group_message_button)
+        layout.addLayout(send_layout)
+        
+        # Initially locked
+        self.group_message_edit.setEnabled(False)
+        self.send_group_message_button.setEnabled(False)
+        self.refresh_messages_button.setEnabled(False)
         
         return widget
 
@@ -1480,6 +1796,278 @@ class MainWindow(QMainWindow):
         self.show_success("Contact Removed", f"Removed {username} from your contacts.")
         self._refresh_contacts_ui()
 
+    # --- GROUP OPERATIONS ---
+
+    @Slot()
+    def do_refresh_groups(self):
+        """Refreshes the list of groups."""
+        if not self.refresh_groups_button.isEnabled():
+            return
+        
+        self.statusBar().showMessage("Refreshing groups...")
+        self.refresh_groups_button.setEnabled(False)
+        
+        worker = Worker(api_list_groups, self.session)
+        worker.signals.success.connect(self.on_refresh_groups_success)
+        worker.signals.error.connect(self.on_refresh_groups_error)
+        worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        worker.signals.finished.connect(lambda: self.refresh_groups_button.setEnabled(True))
+        self.running_workers.add(worker)
+        self.threadpool.start(worker)
+
+    @Slot()
+    def do_create_group(self):
+        """Creates a new group with an encrypted group key."""
+        name = self.group_name_edit.text().strip()
+        passphrase = self.group_passphrase_edit.text()
+        
+        if not name or not passphrase:
+            self.show_error("Create Group", "Group name and passphrase are required.")
+            return
+        
+        self.statusBar().showMessage("Creating group...")
+        self.create_group_button.setEnabled(False)
+        
+        def create_task(sess, name, passphrase):
+            # Generate group key
+            group_key = generate_group_key()
+            
+            # Encrypt it for the creator
+            encrypted_key_b64 = encrypt_group_key_for_user(group_key, passphrase)
+            
+            # Create the group
+            result = api_create_group(sess, name, encrypted_key_b64)
+            return result, group_key  # Return both for caching
+        
+        worker = Worker(create_task, self.session, name, passphrase)
+        worker.signals.success.connect(self.on_create_group_success)
+        worker.signals.error.connect(self.on_create_group_error)
+        worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        worker.signals.finished.connect(lambda: self.create_group_button.setEnabled(True))
+        self.running_workers.add(worker)
+        self.threadpool.start(worker)
+
+    @Slot()
+    def do_add_group_member(self):
+        """Adds a member to the currently selected group."""
+        if not self.current_group_id:
+            self.show_error("Add Member", "Please select a group from 'My Groups' first.")
+            return
+        
+        username = self.add_member_username_edit.text().strip()
+        passphrase = self.add_member_passphrase_edit.text()
+        
+        if not username or not passphrase:
+            self.show_error("Add Member", "Username and passphrase are required.")
+            return
+        
+        # Get the group key from cache
+        if self.current_group_id not in self.group_keys_cache:
+            self.show_error("Add Member", "Group key not available. Please unlock the group first in 'Group Chat'.")
+            return
+        
+        group_key = self.group_keys_cache[self.current_group_id]
+        
+        self.statusBar().showMessage(f"Adding {username} to group...")
+        self.add_member_button.setEnabled(False)
+        
+        def add_task(sess, group_id, username, group_key, passphrase):
+            # Encrypt the group key for the new member
+            encrypted_key_b64 = encrypt_group_key_for_user(group_key, passphrase)
+            return api_add_group_member(sess, group_id, username, encrypted_key_b64)
+        
+        worker = Worker(add_task, self.session, self.current_group_id, username, group_key, passphrase)
+        worker.signals.success.connect(self.on_add_member_success)
+        worker.signals.error.connect(self.on_add_member_error)
+        worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        worker.signals.finished.connect(lambda: self.add_member_button.setEnabled(True))
+        self.running_workers.add(worker)
+        self.threadpool.start(worker)
+
+    @Slot()
+    def on_group_selected(self, item):
+        """Called when a group is selected in the list."""
+        if not item:
+            return
+        # Extract group ID from item data
+        group_id = item.data(Qt.ItemDataRole.UserRole)
+        self.current_group_id = group_id
+
+    @Slot()
+    def do_view_group_members(self):
+        """Views members of the currently selected group."""
+        if not self.current_group_id:
+            self.show_error("View Members", "Please select a group first.")
+            return
+        
+        self.statusBar().showMessage("Loading group members...")
+        
+        worker = Worker(api_get_group_members, self.session, self.current_group_id)
+        worker.signals.success.connect(self.on_view_members_success)
+        worker.signals.error.connect(self.on_view_members_error)
+        worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        self.running_workers.add(worker)
+        self.threadpool.start(worker)
+
+    @Slot()
+    def do_delete_group(self):
+        """Deletes the currently selected group (creator only)."""
+        if not self.current_group_id:
+            self.show_error("Delete Group", "Please select a group first.")
+            return
+        
+        reply = QMessageBox.warning(
+            self,
+            "Confirm Delete",
+            "Are you sure you want to delete this group? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
+        self.statusBar().showMessage("Deleting group...")
+        
+        worker = Worker(api_delete_group, self.session, self.current_group_id)
+        worker.signals.success.connect(self.on_delete_group_success)
+        worker.signals.error.connect(self.on_delete_group_error)
+        worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        self.running_workers.add(worker)
+        self.threadpool.start(worker)
+
+    @Slot()
+    def do_leave_group(self):
+        """Leaves the currently selected group."""
+        if not self.current_group_id:
+            self.show_error("Leave Group", "Please select a group first.")
+            return
+        
+        reply = QMessageBox.warning(
+            self,
+            "Confirm Leave",
+            "Are you sure you want to leave this group?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
+        self.statusBar().showMessage("Leaving group...")
+        
+        worker = Worker(api_remove_group_member, self.session, self.current_group_id, self.session.username)
+        worker.signals.success.connect(self.on_leave_group_success)
+        worker.signals.error.connect(self.on_leave_group_error)
+        worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        self.running_workers.add(worker)
+        self.threadpool.start(worker)
+
+    @Slot()
+    def on_chat_group_changed(self):
+        """Called when the chat group selector changes."""
+        # Reset chat state when switching groups
+        self.group_message_edit.setEnabled(False)
+        self.send_group_message_button.setEnabled(False)
+        self.refresh_messages_button.setEnabled(False)
+        self.group_messages_text.clear()
+
+    @Slot()
+    def do_unlock_group_chat(self):
+        """Unlocks a group chat by decrypting the group key."""
+        group_index = self.chat_group_combo.currentIndex()
+        if group_index < 0:
+            self.show_error("Unlock Chat", "Please select a group first.")
+            return
+        
+        group_id = self.chat_group_combo.itemData(group_index)
+        passphrase = self.chat_passphrase_edit.text()
+        
+        if not passphrase:
+            self.show_error("Unlock Chat", "Passphrase is required.")
+            return
+        
+        # Find the group in the list to get the encrypted key
+        group_info = None
+        for g in self.groups_list:
+            if g['id'] == group_id:
+                group_info = g
+                break
+        
+        if not group_info:
+            self.show_error("Unlock Chat", "Group not found.")
+            return
+        
+        self.statusBar().showMessage("Unlocking chat...")
+        
+        def unlock_task(encrypted_key_b64, passphrase):
+            return decrypt_group_key_for_user(encrypted_key_b64, passphrase)
+        
+        worker = Worker(unlock_task, group_info['encrypted_group_key_b64'], passphrase)
+        worker.signals.success.connect(lambda key: self.on_unlock_chat_success(group_id, key))
+        worker.signals.error.connect(self.on_unlock_chat_error)
+        worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        self.running_workers.add(worker)
+        self.threadpool.start(worker)
+
+    @Slot()
+    def do_refresh_group_messages(self):
+        """Refreshes messages for the currently unlocked group."""
+        group_index = self.chat_group_combo.currentIndex()
+        if group_index < 0:
+            return
+        
+        group_id = self.chat_group_combo.itemData(group_index)
+        
+        if group_id not in self.group_keys_cache:
+            self.show_error("Refresh Messages", "Please unlock the chat first.")
+            return
+        
+        self.statusBar().showMessage("Loading messages...")
+        
+        worker = Worker(api_get_group_messages, self.session, group_id)
+        worker.signals.success.connect(lambda msgs: self.on_refresh_messages_success(group_id, msgs))
+        worker.signals.error.connect(self.on_refresh_messages_error)
+        worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        self.running_workers.add(worker)
+        self.threadpool.start(worker)
+
+    @Slot()
+    def do_send_group_message(self):
+        """Sends a message to the group."""
+        message = self.group_message_edit.text().strip()
+        if not message:
+            return
+        
+        group_index = self.chat_group_combo.currentIndex()
+        if group_index < 0:
+            return
+        
+        group_id = self.chat_group_combo.itemData(group_index)
+        
+        if group_id not in self.group_keys_cache:
+            self.show_error("Send Message", "Please unlock the chat first.")
+            return
+        
+        group_key = self.group_keys_cache[group_id]
+        
+        self.statusBar().showMessage("Sending message...")
+        self.send_group_message_button.setEnabled(False)
+        
+        def send_task(sess, group_id, message, group_key):
+            encrypted_blob_b64 = encrypt_group_message(message, group_key)
+            return api_send_group_message(sess, group_id, encrypted_blob_b64)
+        
+        worker = Worker(send_task, self.session, group_id, message, group_key)
+        worker.signals.success.connect(lambda r: self.on_send_message_success(group_id))
+        worker.signals.error.connect(self.on_send_message_error)
+        worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
+        worker.signals.finished.connect(lambda: self.send_group_message_button.setEnabled(True))
+        self.running_workers.add(worker)
+        self.threadpool.start(worker)
+
+    # --- END GROUP OPERATIONS ---
+
 
     # -----------------------------------------------
     # --- "ON" METHODS (Worker -> GUI Callbacks) ---
@@ -1694,6 +2282,167 @@ class MainWindow(QMainWindow):
         # Re-enable the widget if it failed
         item_widget.setEnabled(True)
     # --- END ADD ---
+
+    # --- GROUP CALLBACKS ---
+    
+    @Slot(object)
+    def on_refresh_groups_success(self, groups_data):
+        """Updates the groups list UI."""
+        self.groups_list = groups_data
+        self.statusBar().showMessage(f"Loaded {len(groups_data)} groups.")
+        
+        # Update the list widget
+        self.groups_list_widget.clear()
+        for group in groups_data:
+            item_text = f"{group['name']} (by {group['creator']})"
+            if group['is_admin']:
+                item_text += " [Admin]"
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.ItemDataRole.UserRole, group['id'])
+            self.groups_list_widget.addItem(item)
+        
+        # Update chat combo
+        self.chat_group_combo.clear()
+        for group in groups_data:
+            self.chat_group_combo.addItem(group['name'], group['id'])
+
+    @Slot(Exception)
+    def on_refresh_groups_error(self, e):
+        self.show_error("Refresh Groups Error", f"Could not load groups: {e}")
+
+    @Slot(object)
+    def on_create_group_success(self, result):
+        """Called when group is successfully created."""
+        group_data, group_key = result
+        group_id = group_data['id']
+        
+        # Cache the group key
+        self.group_keys_cache[group_id] = group_key
+        self.current_group_id = group_id
+        
+        self.show_success("Group Created", f"Group '{group_data['name']}' created successfully.\nYou can now add members.")
+        self.group_name_edit.clear()
+        self.group_passphrase_edit.clear()
+        
+        # Refresh groups list
+        self.do_refresh_groups()
+
+    @Slot(Exception)
+    def on_create_group_error(self, e):
+        self.show_error("Create Group Error", f"Could not create group: {e}")
+
+    @Slot(object)
+    def on_add_member_success(self, result):
+        """Called when member is successfully added."""
+        self.show_success("Member Added", f"User '{result['username']}' added to the group.")
+        self.add_member_username_edit.clear()
+        self.add_member_passphrase_edit.clear()
+
+    @Slot(Exception)
+    def on_add_member_error(self, e):
+        self.show_error("Add Member Error", f"Could not add member: {e}")
+
+    @Slot(object)
+    def on_view_members_success(self, members):
+        """Shows a dialog with group members."""
+        member_text = "Group Members:\n\n"
+        for member in members:
+            admin_tag = " [Admin]" if member['is_admin'] else ""
+            member_text += f"• {member['username']}{admin_tag}\n"
+        
+        QMessageBox.information(self, "Group Members", member_text)
+        self.statusBar().showMessage("Members loaded.")
+
+    @Slot(Exception)
+    def on_view_members_error(self, e):
+        self.show_error("View Members Error", f"Could not load members: {e}")
+
+    @Slot(object)
+    def on_delete_group_success(self, result):
+        """Called when group is deleted."""
+        self.show_success("Group Deleted", "Group has been deleted.")
+        self.current_group_id = None
+        self.do_refresh_groups()
+
+    @Slot(Exception)
+    def on_delete_group_error(self, e):
+        self.show_error("Delete Group Error", f"Could not delete group: {e}")
+
+    @Slot(object)
+    def on_leave_group_success(self, result):
+        """Called when user leaves a group."""
+        self.show_success("Left Group", "You have left the group.")
+        self.current_group_id = None
+        self.do_refresh_groups()
+
+    @Slot(Exception)
+    def on_leave_group_error(self, e):
+        self.show_error("Leave Group Error", f"Could not leave group: {e}")
+
+    @Slot(str, bytes)
+    def on_unlock_chat_success(self, group_id, group_key):
+        """Called when group chat is unlocked."""
+        self.group_keys_cache[group_id] = group_key
+        
+        # Enable chat controls
+        self.group_message_edit.setEnabled(True)
+        self.send_group_message_button.setEnabled(True)
+        self.refresh_messages_button.setEnabled(True)
+        
+        self.statusBar().showMessage("Chat unlocked. Loading messages...")
+        
+        # Auto-load messages
+        self.do_refresh_group_messages()
+
+    @Slot(Exception)
+    def on_unlock_chat_error(self, e):
+        self.show_error("Unlock Error", f"Could not unlock chat: {e}\n\nMake sure you're using the correct passphrase.")
+
+    @Slot(str, list)
+    def on_refresh_messages_success(self, group_id, messages):
+        """Displays decrypted group messages."""
+        if group_id not in self.group_keys_cache:
+            return
+        
+        group_key = self.group_keys_cache[group_id]
+        
+        # Clear and populate messages
+        self.group_messages_text.clear()
+        
+        if not messages:
+            self.group_messages_text.append("No messages yet. Be the first to send one!")
+            return
+        
+        for msg in messages:
+            try:
+                plaintext = decrypt_group_message(msg['encrypted_blob_b64'], group_key)
+                timestamp = msg['created_at'][:19]  # Trim to readable format
+                self.group_messages_text.append(f"[{timestamp}] {msg['sender']}: {plaintext}")
+            except Exception as e:
+                self.group_messages_text.append(f"[{msg['created_at'][:19]}] {msg['sender']}: [Decryption failed]")
+        
+        # Scroll to bottom
+        self.group_messages_text.moveCursor(self.group_messages_text.textCursor().End)
+        self.statusBar().showMessage(f"Loaded {len(messages)} messages.")
+
+    @Slot(Exception)
+    def on_refresh_messages_error(self, e):
+        self.show_error("Load Messages Error", f"Could not load messages: {e}")
+
+    @Slot(str)
+    def on_send_message_success(self, group_id):
+        """Called when message is sent."""
+        self.group_message_edit.clear()
+        self.statusBar().showMessage("Message sent.")
+        
+        # Auto-refresh to show the new message
+        self.do_refresh_group_messages()
+
+    @Slot(Exception)
+    def on_send_message_error(self, e):
+        self.show_error("Send Message Error", f"Could not send message: {e}")
+
+    # --- END GROUP CALLBACKS ---
 
 
     # ---------------------------------
