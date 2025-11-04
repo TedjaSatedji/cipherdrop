@@ -14,3 +14,7 @@ last_user.cfg
 app_config.json
 *.spec
 /venv
+Dockerfile
+server-requirements.txt
+.dockerignore
+*.pyc
