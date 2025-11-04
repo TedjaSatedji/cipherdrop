@@ -13,3 +13,4 @@ last_user.cfg
 app_config.json
 *.spec
 /venv
+*.pyc

@@ -589,17 +589,17 @@ class MainWindow(QMainWindow):
         self.group_keys_cache = {}  # {group_id: decrypted_group_key_bytes}
         
         self.inbox_refresh_timer = QTimer(self)
-        self.inbox_refresh_timer.setInterval(5000)
+        self.inbox_refresh_timer.setInterval(1000)
         self.inbox_refresh_timer.timeout.connect(self.do_refresh_inbox)
         
         # --- NEW: Timer for refreshing the groups list ---
         self.groups_refresh_timer = QTimer(self)
-        self.groups_refresh_timer.setInterval(15000) # 15 seconds
+        self.groups_refresh_timer.setInterval(1000) # 1 second
         self.groups_refresh_timer.timeout.connect(self.do_refresh_groups)
         
         # --- NEW: Timer for refreshing the active group chat ---
         self.chat_refresh_timer = QTimer(self)
-        self.chat_refresh_timer.setInterval(5000) # 5 seconds
+        self.chat_refresh_timer.setInterval(1000) # 1 second
         self.chat_refresh_timer.timeout.connect(self.do_refresh_group_messages)
         # --- END NEW ---
         
