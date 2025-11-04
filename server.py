@@ -62,6 +62,43 @@ class Item(Base):
     sender = relationship("User", foreign_keys=[sender_id])
     receiver = relationship("User", foreign_keys=[receiver_id])
 
+class Group(Base):
+    __tablename__ = "groups"
+    id = Column(String(12), primary_key=True)
+    name = Column(String(100), nullable=False)
+    creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime, default=_now)
+    # Store the encrypted group key for the creator
+    # This will be replicated in GroupMembership for each member
+    creator = relationship("User", foreign_keys=[creator_id])
+    members = relationship("GroupMembership", back_populates="group", cascade="all, delete-orphan")
+    messages = relationship("GroupMessage", back_populates="group", cascade="all, delete-orphan")
+
+class GroupMembership(Base):
+    __tablename__ = "group_memberships"
+    id = Column(Integer, primary_key=True)
+    group_id = Column(String(12), ForeignKey("groups.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    # Encrypted group key specific to this user (encrypted with their passphrase)
+    encrypted_group_key_b64 = Column(String, nullable=False)
+    joined_at = Column(DateTime, default=_now)
+    is_admin = Column(Boolean, default=False, nullable=False)
+    
+    group = relationship("Group", back_populates="members")
+    user = relationship("User")
+
+class GroupMessage(Base):
+    __tablename__ = "group_messages"
+    id = Column(String(12), primary_key=True)
+    group_id = Column(String(12), ForeignKey("groups.id"), nullable=False)
+    sender_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    # Encrypted message blob (encrypted with the group key)
+    encrypted_blob = Column(LargeBinary, nullable=False)
+    created_at = Column(DateTime, default=_now)
+    
+    group = relationship("Group", back_populates="messages")
+    sender = relationship("User")
+
 Base.metadata.create_all(engine)
 
 app = FastAPI(title="CipherDrop", version="2.0")
@@ -138,6 +175,37 @@ class InboxItem(BaseModel):
     created_at: str
     expires_at: str
     consumed: bool
+
+# --- Schemas: Groups ---
+class CreateGroupReq(BaseModel):
+    name: str = Field(..., description="Group name")
+    encrypted_group_key_b64: str = Field(..., description="Base64 encoded encrypted group key for creator")
+
+class AddMemberReq(BaseModel):
+    username: str = Field(..., description="Username to add")
+    encrypted_group_key_b64: str = Field(..., description="Encrypted group key for this user")
+
+class SendGroupMessageReq(BaseModel):
+    encrypted_blob_b64: str = Field(..., description="Base64 encoded encrypted message")
+
+class GroupInfo(BaseModel):
+    id: str
+    name: str
+    creator: str
+    created_at: str
+    is_admin: bool
+    encrypted_group_key_b64: str
+
+class GroupMemberInfo(BaseModel):
+    username: str
+    joined_at: str
+    is_admin: bool
+
+class GroupMessageInfo(BaseModel):
+    id: str
+    sender: str
+    encrypted_blob_b64: str
+    created_at: str
 
 # --- Routes: auth ---
 @app.post("/auth/register")
