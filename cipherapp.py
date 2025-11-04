@@ -2427,6 +2427,39 @@ class MainWindow(QMainWindow):
         # 6. Unblock signals
         self.chat_group_combo.blockSignals(False)
         # --- END OF FIX ---
+        
+    @Slot(object)
+    def on_create_group_success(self, result_tuple):
+        """Called when group is successfully created."""
+        
+        # Unpack the result from the create_task
+        try:
+            api_result, group_key = result_tuple
+        except Exception as e:
+            self.show_error("Create Group", f"Unexpected result from worker: {e}")
+            return
+        
+        group_id = api_result.get('id')
+        group_name = api_result.get('name')
+        
+        if not group_id:
+            self.show_error("Create Group", "Failed to create group: Server did not return a group ID.")
+            return
+
+        # Cache the new group's key
+        self.group_keys_cache[group_id] = group_key
+        
+        self.show_success("Group Created", f"Successfully created group '{group_name}'.\nID: {group_id}")
+        
+        # Clear the form
+        self.group_name_edit.clear()
+        self.group_passphrase_edit.clear()
+        
+        # Refresh the groups list to show the new one
+        self.do_refresh_groups()
+        
+        # Auto-select this new group so user can immediately add members
+        self.current_group_id = group_id
 
     @Slot(Exception)
     def on_create_group_error(self, e):
