@@ -590,17 +590,17 @@ class MainWindow(QMainWindow):
         
         self.inbox_refresh_timer = QTimer(self)
         self.inbox_refresh_timer.setInterval(1000)
-        self.inbox_refresh_timer.timeout.connect(self.do_refresh_inbox)
+        self.inbox_refresh_timer.timeout.connect(lambda: self.do_refresh_inbox(is_auto_refresh=True))
         
         # --- NEW: Timer for refreshing the groups list ---
         self.groups_refresh_timer = QTimer(self)
         self.groups_refresh_timer.setInterval(1000) # 1 second
-        self.groups_refresh_timer.timeout.connect(self.do_refresh_groups)
+        self.groups_refresh_timer.timeout.connect(lambda: self.do_refresh_groups(is_auto_refresh=True))
         
         # --- NEW: Timer for refreshing the active group chat ---
         self.chat_refresh_timer = QTimer(self)
         self.chat_refresh_timer.setInterval(1000) # 1 second
-        self.chat_refresh_timer.timeout.connect(self.do_refresh_group_messages)
+        self.chat_refresh_timer.timeout.connect(lambda: self.do_refresh_group_messages(is_auto_refresh=True))
         # --- END NEW ---
         
         # --- Store file paths for uploads ---
@@ -1590,28 +1590,28 @@ class MainWindow(QMainWindow):
         self.running_workers.add(worker) # Hold reference
         self.threadpool.start(worker)
 
+    # Find this function (around line 1709)
     @Slot()
-    def do_refresh_inbox(self):
+    def do_refresh_inbox(self, is_auto_refresh: bool = False): # <--- 1. Add parameter
         """Starts the inbox refresh worker."""
 
         # --- THIS IS THE ANTI-STACKING CHECK ---
-        # If the button is *already* disabled, it means a refresh
-        # is in progress. Don't start another one.
         if not self.refresh_inbox_button.isEnabled():
             return
         # --- END OF CHECK ---
 
-        self.statusBar().showMessage("Refreshing inbox...")
-        self.refresh_inbox_button.setEnabled(False)
+        if not is_auto_refresh: # <--- 2. Add this check
+            self.statusBar().showMessage("Refreshing inbox...")
+            self.refresh_inbox_button.setEnabled(False)
 
         worker = Worker(api_inbox, self.session)
         worker.signals.success.connect(self.on_inbox_success)
         worker.signals.error.connect(self.on_inbox_error)
         worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
 
-        # This is the line you wanted to retain, which is perfect.
-        # It re-enables the button when the worker is done.
-        worker.signals.finished.connect(lambda: self.refresh_inbox_button.setEnabled(True))
+        if not is_auto_refresh: # <--- 3. Add this check
+            # Only re-enable if it was a manual click
+            worker.signals.finished.connect(lambda: self.refresh_inbox_button.setEnabled(True))
 
         self.running_workers.add(worker) # Hold reference
         self.threadpool.start(worker)
@@ -1848,20 +1848,25 @@ class MainWindow(QMainWindow):
 
     # --- GROUP OPERATIONS ---
 
+        
     @Slot()
-    def do_refresh_groups(self):
+    def do_refresh_groups(self, is_auto_refresh: bool = False): # <--- 1. Add parameter
         """Refreshes the list of groups."""
         if not self.refresh_groups_button.isEnabled():
             return
-        
-        self.statusBar().showMessage("Refreshing groups...")
-        self.refresh_groups_button.setEnabled(False)
-        
+
+        if not is_auto_refresh: # <--- 2. Add this check
+            self.statusBar().showMessage("Refreshing groups...")
+            self.refresh_groups_button.setEnabled(False)
+
         worker = Worker(api_list_groups, self.session)
         worker.signals.success.connect(self.on_refresh_groups_success)
         worker.signals.error.connect(self.on_refresh_groups_error)
         worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
-        worker.signals.finished.connect(lambda: self.refresh_groups_button.setEnabled(True))
+
+        if not is_auto_refresh: # <--- 3. Add this check
+            worker.signals.finished.connect(lambda: self.refresh_groups_button.setEnabled(True))
+
         self.running_workers.add(worker)
         self.threadpool.start(worker)
 
@@ -2066,9 +2071,9 @@ class MainWindow(QMainWindow):
         self.threadpool.start(worker)
 
     @Slot()
-    def do_refresh_group_messages(self):
+    def do_refresh_group_messages(self, is_auto_refresh: bool = False): # <--- 1. Add parameter
         """Refreshes messages for the currently unlocked group."""
-        
+
         # --- NEW: Anti-stacking check ---
         if not self.refresh_messages_button.isEnabled():
             return # A refresh is already in progress
@@ -2077,28 +2082,25 @@ class MainWindow(QMainWindow):
         group_index = self.chat_group_combo.currentIndex()
         if group_index < 0:
             return
-        
+
         group_id = self.chat_group_combo.itemData(group_index)
-        
+
         if group_id not in self.group_keys_cache:
             # No chat unlocked, just fail silently for the auto-refresher
             return
-        
-        self.statusBar().showMessage("Loading messages...")
-        
-        # --- NEW: Disable button during refresh ---
-        self.refresh_messages_button.setEnabled(False)
-        # --- END NEW ---
-        
+
+        if not is_auto_refresh: # <--- 2. Add this check
+            self.statusBar().showMessage("Loading messages...")
+            self.refresh_messages_button.setEnabled(False)
+
         worker = Worker(api_get_group_messages, self.session, group_id)
         worker.signals.success.connect(lambda msgs: self.on_refresh_messages_success(group_id, msgs))
         worker.signals.error.connect(self.on_refresh_messages_error)
         worker.signals.finished.connect(lambda: self.on_worker_finished(worker))
-        
-        # --- NEW: Re-enable button when finished ---
-        worker.signals.finished.connect(lambda: self.refresh_messages_button.setEnabled(True))
-        # --- END NEW ---
-        
+
+        if not is_auto_refresh: # <--- 3. Add this check
+            worker.signals.finished.connect(lambda: self.refresh_messages_button.setEnabled(True))
+
         self.running_workers.add(worker)
         self.threadpool.start(worker)
         
